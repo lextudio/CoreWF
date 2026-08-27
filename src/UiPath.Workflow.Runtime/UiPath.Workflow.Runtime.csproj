@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFrameworks>net6.0;net6.0-windows</TargetFrameworks>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
 	<AssemblyName>System.Activities</AssemblyName>
 	<PackageId>UiPath.Workflow.Runtime</PackageId>
 	<PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -31,7 +31,7 @@
       <BuildOutputInPackage Include="@(ReferenceCopyLocalPaths-&gt;WithMetadataValue('ReferenceSourceTarget', 'ProjectReference'))" />
     </ItemGroup>
   </Target>
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="$(Configuration)=='Release'">
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release' AND '$(OS)' == 'Windows_NT'">
     <Exec Command="rd /S /Q %25UserProfile%25\.nuget\packages\$(MSBuildProjectName)" />
   </Target>
 </Project>

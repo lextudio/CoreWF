@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <TargetFrameworks>net6.0;net6.0-windows</TargetFrameworks>
+        <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
         <Description>Unofficial port of the Windows Workflow Foundation (WF) to .NET 6</Description>
         <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);CopyProjectReferencesToPackage</TargetsForTfmSpecificBuildOutput>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -30,7 +30,7 @@
             <BuildOutputInPackage Include="$(OutputPath)Microsoft.CodeAnalysis.VisualBasic.Scripting.*"/>
         </ItemGroup>
     </Target>
-    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="$(Configuration)=='Release'">
+    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(Configuration)' == 'Release' AND '$(OS)' == 'Windows_NT'">
         <Exec Command="rd /S /Q %25UserProfile%25\.nuget\packages\$(TargetName)"/>
     </Target>
 </Project>
