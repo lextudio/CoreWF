@@ -1,0 +1,24 @@
+<Project Sdk="LibreWPF.Sdk">
+  <PropertyGroup>
+    <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../UnoDevelop/externals/OpenDevelop/'))</OpenDevelopRoot>
+    <OpenDevelopAddin>true</OpenDevelopAddin>
+    <OpenDevelopAddinKind>InProcess</OpenDevelopAddinKind>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>ICSharpCode.WorkflowDesigner</AssemblyName>
+    <RootNamespace>ICSharpCode.WorkflowDesigner</RootNamespace>
+    <OutputPath>$(OpenDevelopRoot)AddIns\DisplayBindings\WorkflowDesigner\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <Import Project="$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.props" Condition="Exists('$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.props')" />
+  <ItemGroup>
+    <ProjectReference Include="$(OpenDevelopRoot)src/Main/Base/Project/ICSharpCode.SharpDevelop.csproj" Private="false" />
+    <ProjectReference Include="$(OpenDevelopRoot)src/Main/Core/Project/ICSharpCode.Core.csproj" Private="false" />
+    <ProjectReference Include="$(OpenDevelopRoot)src/Main/ICSharpCode.SharpDevelop.Widgets/Project/ICSharpCode.SharpDevelop.Widgets.csproj" Private="false" />
+    <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Remote/Designer.Remote.csproj" Private="false" />
+    <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Shell/Designer.Shell.csproj" Private="false" />
+    <ProjectReference Include="..\WorkflowDesigner.Host\WorkflowDesigner.Host.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+  <ItemGroup><None Include="WorkflowDesigner.addin" /></ItemGroup>
+  <Import Project="$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets" Condition="Exists('$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets')" />
+</Project>

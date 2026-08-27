@@ -6,6 +6,6 @@
 		<UseWPF Condition="$(TargetFramework) == 'net10.0-windows'">true</UseWPF>
 	</PropertyGroup>
 	<ItemGroup Condition="$(AssemblyName) != 'System.Xaml' AND $(TargetFramework) != 'net10.0-windows'">
-		<ProjectReference Include="$(SolutionDir)\System.Xaml\System.Xaml.csproj" PrivateAssets="All" />
+		<ProjectReference Include="$(MSBuildThisFileDirectory)System.Xaml/System.Xaml.csproj" PrivateAssets="All" />
 	</ItemGroup>
 </Project>
