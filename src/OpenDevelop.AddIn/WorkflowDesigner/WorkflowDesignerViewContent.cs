@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using Ellipse = System.Windows.Shapes.Ellipse;
@@ -1222,17 +1223,33 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	{
 		var stack = new StackPanel();
 		stack.Children.Add(HeaderLabel(node));
+		foreach (var row in PropertyRows(node)) stack.Children.Add(row);
 		if (node.Children.Count == 0 && IsContainer(node.Type))
-			stack.Children.Add(new TextBlock { Text = node.Type == "Flowchart" ? "Drop the first flow step here" : "Drop activity here", FontStyle = FontStyles.Italic, Foreground = Brushes.Gray, Margin = new Thickness(0, 4, 0, 0) });
+			stack.Children.Add(new TextBlock { Text = node.Type == "Flowchart" ? "Drop the first flow step here" : "Drop activity here", FontStyle = FontStyles.Italic, Foreground = HintInk, Margin = new Thickness(8, 6, 8, 8) });
 		if (!collapsed.Contains(node.Id)) {
 			if (node.Type == "Flowchart") stack.Children.Add(FlowchartGraph(node));
 			else if (node.Type == "StateMachine") stack.Children.Add(StateMachineGraph(node));
-			else foreach (var child in node.Children) stack.Children.Add(Box(child));
+			else {
+				// A Sequence-like body runs top to bottom, so draw the order instead of leaving the
+				// reader to infer it from stacking - this is the "▽ between steps" the WF designer
+				// uses. Only bodies that actually execute in order get connectors: If/TryCatch hold
+				// branches, where a downward arrow would assert a sequence that does not exist.
+				var ordered = node.Type is "Sequence" or "Parallel" or "While" or "DoWhile" or "State";
+				for (var index = 0; index < node.Children.Count; index++) {
+					if (ordered && index > 0) stack.Children.Add(StepConnector());
+					stack.Children.Add(Box(node.Children[index]));
+				}
+			}
 		}
 		var border = new Border {
-			BorderBrush = ValidationBorder(node, node.Type == "Flowchart" ? Brushes.Teal : Brushes.SlateGray), BorderThickness = new Thickness(1.5), CornerRadius = new CornerRadius(4),
-			Background = Brushes.White, Margin = new Thickness(4), Padding = new Thickness(8), Child = stack
+			BorderBrush = ValidationBorder(node, node.Type == "Flowchart" ? Brushes.Teal : ActivityEdge), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(3),
+			Background = ActivityBody, Margin = new Thickness(4), Child = stack
 		};
+		// The workbench theme can be dark, and these boxes are deliberately light (WF's canvas is a
+		// document, not chrome). Foreground is inherited, so without pinning it here every label
+		// inside rendered in the theme's near-white ink on our white body - the "washed out,
+		// unreadable text" this canvas used to show. Pin once on the box; descendants inherit.
+		TextElement.SetForeground(border, ActivityInk);
 		border.AllowDrop = true;
 		border.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(typeof(DesignerToolboxItemInfo)) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
 		border.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) Add(item.TypeName, node.Id); e.Handled = true; };
@@ -1454,17 +1471,125 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	/// <summary>DisplayName header label - double-click swaps it for a TextBox that commits on
 	/// Enter/lost-focus, matching sequence-activity-designer.md's "the value can be edited in the
 	/// property grid or directly on the header of the activity designer".</summary>
+	// The activity canvas is a light "document" surface regardless of the workbench theme, matching
+	// what the WF designer draws. Keeping the palette in one place stops individual elements from
+	// falling back to inherited theme brushes, which is what made the old boxes unreadable.
+	static readonly Brush ActivityInk = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
+	static readonly Brush HintInk = new SolidColorBrush(Color.FromRgb(0x70, 0x70, 0x70));
+	static readonly Brush ActivityBody = Brushes.White;
+	static readonly Brush ActivityHeader = new SolidColorBrush(Color.FromRgb(0xEF, 0xF1, 0xF4));
+	static readonly Brush ActivityEdge = new SolidColorBrush(Color.FromRgb(0xA5, 0xAF, 0xBA));
+	static readonly Brush ConnectorInk = new SolidColorBrush(Color.FromRgb(0x8A, 0x96, 0xA3));
+
+	/// <summary>
+	/// The downward step marker WF draws between consecutive activities in a sequence body, so
+	/// execution order is something the diagram states rather than something the reader infers.
+	/// </summary>
+	static FrameworkElement StepConnector() => new Polygon {
+		Points = new PointCollection { new Point(0, 0), new Point(10, 0), new Point(5, 7) },
+		Fill = ConnectorInk,
+		HorizontalAlignment = HorizontalAlignment.Center,
+		Margin = new Thickness(0, 1, 0, 1),
+		IsHitTestVisible = false
+	};
+
+	/// <summary>
+	/// The WF designer shows an activity's own values in its body (Assign renders
+	/// <c>Target = New System.Random</c>), which is most of what makes its diagram readable at a
+	/// glance. Ours previously showed nothing, so a WriteLine was an unlabelled box whose text only
+	/// appeared in the Properties pad. Rendered for leaf activities only - a container's body is
+	/// already occupied by its children, and WF does not annotate containers either.
+	/// </summary>
+	IEnumerable<FrameworkElement> PropertyRows(DesignerElementNode node)
+	{
+		if (node.Children.Count > 0 || node.Properties == null) yield break;
+		foreach (var property in node.Properties) {
+			// $displayName is the header's own text, and empty values would render as a blank row.
+			if (property.Name == "$displayName" || string.IsNullOrWhiteSpace(property.Value)) continue;
+			var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(8, 3, 8, 3) };
+			row.Children.Add(new TextBlock {
+				Text = property.DisplayName is { Length: > 0 } display ? display : property.Name,
+				Foreground = HintInk, Margin = new Thickness(0, 0, 8, 0), MinWidth = 54
+			});
+			row.Children.Add(new TextBlock { Text = property.Value, Foreground = ActivityInk, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 260 });
+			yield return row;
+		}
+	}
+
+	/// <summary>Embedded icon for an activity type, falling back to a generic activity glyph.</summary>
+	static ImageSource? ActivityIcon(string type) => WorkflowIcons.Load(type switch {
+		"Sequence" => "Sequence",
+		"Parallel" => "Parallel",
+		"While" or "DoWhile" or "ForEach" => "Loop",
+		"If" or "FlowDecision" => "If",
+		"TryCatch" => "TryCatch",
+		"StateMachine" => "StateMachine",
+		"State" or "Transition" => "Event",
+		"Flowchart" or "FlowStep" => "DecisionTree",
+		"Assign" => "Assign",
+		"WriteLine" => "Console",
+		"Delay" => "Time",
+		_ => "Activity"
+	});
+
+	/// <summary>
+	/// CLR generic type names arrive with their arity suffix (<c>Literal`1</c>), an implementation
+	/// detail no workflow author recognises. Strip it - the readable form is the node's own Name,
+	/// which the host already expands to <c>Literal&lt;String&gt;</c>.
+	/// </summary>
+	static string FriendlyType(string type)
+	{
+		var tick = type.IndexOf('`');
+		return tick < 0 ? type : type.Substring(0, tick);
+	}
+
+	static string HeaderText(DesignerElementNode node)
+	{
+		var friendly = FriendlyType(node.Type);
+		if (!string.IsNullOrEmpty(node.Name)) {
+			// Name often already contains the type ("Literal<String>"), which the old format
+			// rendered as: Literal`1 "Literal<String>" - the same word twice around a backtick.
+			if (node.Name!.StartsWith(friendly, StringComparison.Ordinal)) return node.Name!;
+			if (node.Name != node.Type) return $"{friendly} \"{node.Name}\"";
+		}
+		return friendly;
+	}
+
 	FrameworkElement HeaderLabel(DesignerElementNode node)
 	{
-		var label = new TextBlock { Text = $"{node.Type}" + (string.IsNullOrEmpty(node.Name) || node.Name == node.Type ? "" : $" \"{node.Name}\""), FontWeight = FontWeights.Bold };
+		var label = new TextBlock {
+			Text = HeaderText(node),
+			FontWeight = FontWeights.SemiBold, Foreground = ActivityInk, VerticalAlignment = VerticalAlignment.Center
+		};
 		label.MouseLeftButtonDown += (_, e) => { if (e.ClickCount == 2) { if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) BeginEditHeader(node, label); else { drillRootId = node.Id; Rebuild(); } e.Handled = true; } };
-		if (node.Children.Count == 0) return label;
+
+		// WF gives every activity a header band - icon, name, and (for containers) a collapse
+		// chevron - visually separated from the body. Previously this was a bare bold TextBlock,
+		// so an activity read as an undifferentiated rounded rectangle.
 		var header = new StackPanel { Orientation = Orientation.Horizontal };
-		var chevron = new Button { Content = collapsed.Contains(node.Id) ? "›" : "⌄", Width = 20, Height = 20, Padding = new Thickness(0), Margin = new Thickness(0, 0, 4, 0), ToolTip = collapsed.Contains(node.Id) ? "Expand" : "Collapse" };
-		chevron.Click += (_, _) => { if (!collapsed.Add(node.Id)) collapsed.Remove(node.Id); Rebuild(); };
-		header.Children.Add(chevron);
+		if (ActivityIcon(node.Type) is { } icon)
+			header.Children.Add(new Image { Source = icon, Width = 16, Height = 16, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center });
 		header.Children.Add(label);
-		return header;
+
+		if (node.Children.Count > 0) {
+			// A themed Button rendered here as a filled dark square against the light body; a flat
+			// glyph keeps the affordance without importing the workbench's control chrome.
+			var isCollapsed = collapsed.Contains(node.Id);
+			var chevron = new TextBlock {
+				Text = isCollapsed ? "›" : "⌄", Foreground = HintInk, FontWeight = FontWeights.Bold,
+				Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Hand,
+				ToolTip = isCollapsed ? "Expand" : "Collapse"
+			};
+			chevron.MouseLeftButtonDown += (_, e) => { if (!collapsed.Add(node.Id)) collapsed.Remove(node.Id); Rebuild(); e.Handled = true; };
+			header.Children.Insert(0, chevron);
+		}
+
+		return new Border {
+			Background = ActivityHeader,
+			BorderBrush = ActivityEdge, BorderThickness = new Thickness(0, 0, 0, 1),
+			Padding = new Thickness(8, 5, 8, 5),
+			Child = header
+		};
 	}
 
 	void BeginEditHeader(DesignerElementNode node, TextBlock label)
@@ -1475,7 +1600,10 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		void Commit()
 		{
 			parent.Children.RemoveAt(index);
-			parent.Children.Insert(index, HeaderLabel(node));
+			// Restore the label itself, not HeaderLabel(node): the label now lives inside the
+			// header band's StackPanel, so re-inserting a whole header Border here would nest a
+			// second header inside the first.
+			parent.Children.Insert(index, label);
 			if (editor.Text != node.Name) SetProperty(node.Id, "$displayName", editor.Text);
 		}
 		editor.LostFocus += (_, _) => Commit();
