@@ -1,0 +1,20 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 2012
+# SharpDevelop 5.2
+VisualStudioVersion = 12.0.20827.3
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WorkflowDesigner.Host", "WorkflowDesigner.Host.csproj", "{B58263AB-D033-4651-A98D-A3635B0C770A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B58263AB-D033-4651-A98D-A3635B0C770A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B58263AB-D033-4651-A98D-A3635B0C770A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B58263AB-D033-4651-A98D-A3635B0C770A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B58263AB-D033-4651-A98D-A3635B0C770A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

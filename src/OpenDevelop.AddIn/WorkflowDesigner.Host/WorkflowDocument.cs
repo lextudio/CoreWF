@@ -264,6 +264,42 @@ sealed class WorkflowDocument
 		return string.Equals(direction, "Out", StringComparison.OrdinalIgnoreCase) ? null : argumentType;
 	}
 
+	/// <summary>Converts the transport-only Run dialog values into declared workflow inputs.
+	/// Values are deliberately parsed in the isolated host, never by the addin.</summary>
+	public bool TryCreateRunInputs(IReadOnlyDictionary<string, string>? values, out Dictionary<string, object> inputs, out string error)
+	{
+		inputs = new Dictionary<string, object>(StringComparer.Ordinal);
+		error = "";
+		if (values == null || values.Count == 0) return true;
+		if (Builder == null) { error = "No workflow is loaded."; return false; }
+		var declarations = Builder.Properties.ToDictionary(property => property.Name, StringComparer.Ordinal);
+		foreach (var pair in values) {
+			if (!declarations.TryGetValue(pair.Key, out var property)) { error = $"'{pair.Key}' is not a declared workflow input."; return false; }
+			var (type, direction) = GetArgumentTypeAndDirection(property.Type);
+			if (string.Equals(direction, "Out", StringComparison.OrdinalIgnoreCase)) { error = $"'{pair.Key}' is an output argument and cannot be supplied when running."; return false; }
+			var value = ConvertSimple(type, pair.Value);
+			if (value == null && type != typeof(string)) { error = $"'{pair.Value}' is not a valid {type.Name} value for '{pair.Key}'."; return false; }
+			inputs.Add(pair.Key, value!);
+		}
+		return true;
+	}
+
+	/// <summary>Materializes the editable ActivityBuilder as the DynamicActivity expected by
+	/// WorkflowApplication. Running <see cref="Root"/> directly would discard the builder's
+	/// declared workflow arguments.</summary>
+	public Activity? CreateRuntimeActivity()
+	{
+		if (Builder?.Implementation == null) return null;
+		var runtime = new DynamicActivity { Name = Builder.Name, Implementation = () => Builder.Implementation };
+		foreach (var property in Builder.Properties) {
+			var copy = new DynamicActivityProperty { Name = property.Name, Type = property.Type, Value = property.Value };
+			foreach (var attribute in property.Attributes) copy.Attributes.Add(attribute);
+			runtime.Properties.Add(copy);
+		}
+		foreach (var constraint in Builder.Constraints) runtime.Constraints.Add(constraint);
+		return runtime;
+	}
+
 	static IEnumerable<(Activity Activity, string Path)> ActivitiesWithPaths(Activity root, string path)
 	{
 		yield return (root, path);
@@ -467,6 +503,7 @@ sealed class WorkflowDocument
 		if (TryFindTransition(id, out var transitionOwner, out var transition, out _, out var transitionSuffix) && transitionSuffix.Length == 0) {
 			if (string.Equals(propertyName, "$displayName", StringComparison.Ordinal)) { transition.DisplayName = value; return true; }
 			if (string.Equals(propertyName, "$target", StringComparison.Ordinal)) {
+				if (string.IsNullOrWhiteSpace(value)) { transition.To = null; return true; }
 				if (!TryFindState(value, out var targetOwner, out var target, out _, out var targetSuffix) || targetSuffix.Length != 0 || !ReferenceEquals(targetOwner, transitionOwner)) return false;
 				transition.To = target; return true;
 			}
@@ -696,6 +733,126 @@ sealed class WorkflowDocument
 		var index = WorkflowInspectionServices.GetActivities(parent).ToList().IndexOf(child);
 		if (index < 0) return null;
 		return parentId.Length == 0 ? index.ToString() : parentId + "." + index;
+	}
+
+	/// <summary>Creates a detached, XAML-round-tripped copy of the selected activities. Keeping
+	/// the clipboard as XAML rather than live objects is important: a pasted subtree must never
+	/// share arguments, variables, or implementation objects with its source subtree.</summary>
+	public bool Copy(IEnumerable<string> ids)
+	{
+		var requested = ids.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToArray();
+		var selected = requested
+			.Where(id => !requested.Any(parent => parent != id && id.StartsWith(parent + ".", StringComparison.Ordinal)))
+			.Select(id => Find(id)).Where(activity => activity != null).Cast<Activity>().ToList();
+		if (selected.Count == 0) return false;
+		var serialized = new List<string>();
+		foreach (var activity in selected) {
+			var xaml = SerializeActivity(activity);
+			if (xaml == null) return false;
+			serialized.Add(xaml);
+		}
+		clipboard = serialized;
+		return true;
+	}
+
+	public IReadOnlyList<string> Clipboard => clipboard;
+
+	/// <summary>Pastes the most recently copied activity subtrees as fresh CLR objects. The
+	/// destination follows the same slot/collection rules as toolbox insertion, so a paste cannot
+	/// turn a valid WF shape into an invalid object graph.</summary>
+	public IReadOnlyList<string>? Paste(string parentId, IReadOnlyList<string>? clipboardContents = null)
+	{
+		var source = clipboardContents ?? clipboard;
+		if (source.Count == 0) return null;
+		var before = ToXaml();
+		var pasted = new List<string>();
+		foreach (var xaml in source) {
+			var child = DeserializeActivity(xaml);
+			if (child == null) { Reset(before); return null; }
+			var id = AddExistingChild(parentId, child);
+			if (id == null) { Reset(before); return null; }
+			pasted.Add(id);
+		}
+		return pasted;
+	}
+
+	List<string> clipboard = new();
+
+	static string? SerializeActivity(Activity activity)
+	{
+		try {
+			var builder = new ActivityBuilder { Name = "WorkflowDesignerClipboard", Implementation = activity };
+			using var writer = new StringWriter();
+			using var xml = XmlWriter.Create(writer);
+			XamlServices.Save(ActivityXamlServices.CreateBuilderWriter(new XamlXmlWriter(xml, new XamlSchemaContext())), builder);
+			return writer.ToString();
+		} catch { return null; }
+	}
+
+	static Activity? DeserializeActivity(string xaml)
+	{
+		var document = new WorkflowDocument();
+		document.Reset(xaml);
+		return document.LastParseSucceeded ? document.Root : null;
+	}
+
+	string? AddExistingChild(string parentId, Activity child)
+	{
+		if (TryFindTransition(parentId, out _, out var transition, out _, out var transitionSuffix) && transitionSuffix.Length == 0) {
+			if (transition.Trigger == null) { transition.Trigger = child; return parentId + ".0"; }
+			if (transition.Action == null) { transition.Action = child; return parentId + ".1"; }
+			return null;
+		}
+		if (TryFindState(parentId, out _, out var state, out _, out var stateSuffix) && stateSuffix.Length == 0) {
+			if (state.Entry == null) { state.Entry = child; return parentId + ".0"; }
+			if (!state.IsFinal && state.Exit == null) { state.Exit = child; return parentId + ".1"; }
+			return null;
+		}
+		if (TryFindForEachBody(parentId, out var forEach, out var forEachSuffix) && forEachSuffix.Length == 0 && forEach.Body?.Handler == null) {
+			forEach.Body ??= new ActivityAction<int> { Argument = new DelegateInArgument<int> { Name = "item" } };
+			forEach.Body.Handler = child;
+			return parentId + ".0";
+		}
+		if (TryFindParallelForEachBody(parentId, out var parallelForEach, out var parallelForEachSuffix) && parallelForEachSuffix.Length == 0 && parallelForEach.Body?.Handler == null) {
+			parallelForEach.Body ??= new ActivityAction<int> { Argument = new DelegateInArgument<int> { Name = "item" } };
+			parallelForEach.Body.Handler = child;
+			return parentId + ".0";
+		}
+		if (TryFindPickBranch(parentId, out _, out var branch, out _, out var pickSuffix) && pickSuffix.Length == 0) {
+			if (branch.Trigger == null) { branch.Trigger = child; return parentId + ".0"; }
+			if (branch.Action == null) { branch.Action = child; return parentId + ".1"; }
+			return null;
+		}
+		if (TryFindSwitchBranch(parentId, out var @switch, out var existing, out var key, out var switchSuffix) && switchSuffix.Length == 0 && existing == null) {
+			if (key is int caseKey) @switch.Cases[caseKey] = child;
+			else @switch.Default = child;
+			return parentId + ".0";
+		}
+		if (TryFindCatch(parentId, out _, out var @catch, out var catchIndex, out _) && parentId.EndsWith("$catch-" + catchIndex, StringComparison.Ordinal)
+			&& @catch.GetType().GetProperty("Action")?.GetValue(@catch) is ActivityDelegate action && action.Handler == null) {
+			action.Handler = child;
+			return parentId + ".0";
+		}
+		var parent = Find(parentId);
+		if (parent == null) return null;
+		if (parent is Flowchart flowchart) {
+			var step = new FlowStep { Action = child };
+			var previous = flowchart.Nodes.OfType<FlowStep>().LastOrDefault();
+			if (previous != null) previous.Next = step; else flowchart.StartNode = step;
+			flowchart.Nodes.Add(step);
+			return parentId.Length == 0 ? (flowchart.Nodes.OfType<FlowStep>().Count() - 1).ToString() : parentId + "." + (flowchart.Nodes.OfType<FlowStep>().Count() - 1);
+		}
+		var collectionProperty = FindActivityCollectionProperty(parent.GetType());
+		if (collectionProperty != null) {
+			var collection = collectionProperty.GetValue(parent);
+			collectionProperty.PropertyType.GetMethod("Add", new[] { collectionProperty.PropertyType.GetGenericArguments()[0] })?.Invoke(collection, new object[] { child });
+		} else {
+			var slot = parent.GetType().GetProperties().FirstOrDefault(property => property.CanWrite && typeof(Activity).IsAssignableFrom(property.PropertyType) && property.GetValue(parent) == null);
+			if (slot == null) return null;
+			slot.SetValue(parent, child);
+		}
+		var index = WorkflowInspectionServices.GetActivities(parent).ToList().IndexOf(child);
+		return index < 0 ? null : parentId.Length == 0 ? index.ToString() : parentId + "." + index;
 	}
 
 	static string FlowDecisionId(string flowchartPath, int index) => (flowchartPath.Length == 0 ? "" : flowchartPath + ".") + "$decision-" + index;
@@ -960,6 +1117,23 @@ sealed class WorkflowDocument
 		return true;
 	}
 
+	/// <summary>Deletes a designer multi-selection as one tree operation. Descendants of an
+	/// already selected ancestor are intentionally ignored, and a rejected later deletion restores
+	/// the complete original XAML so a command can never leave a half-deleted workflow.</summary>
+	public bool RemoveMany(IEnumerable<string> ids)
+	{
+		var requested = ids.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToArray();
+		var roots = requested.Where(id => !requested.Any(parent => parent != id && id.StartsWith(parent + ".", StringComparison.Ordinal))).ToArray();
+		if (roots.Length == 0) return false;
+		var before = ToXaml();
+		foreach (var id in roots) {
+			if (Remove(id)) continue;
+			Reset(before);
+			return false;
+		}
+		return true;
+	}
+
 	/// <summary>Reconnects two FlowStep actions selected in the tree. The host deliberately
 	/// rejects a back edge that would make the simple FlowStep chain cyclic; decision nodes will
 	/// own explicit loop/branch semantics when the graph protocol grows beyond activity paths.</summary>
@@ -992,6 +1166,26 @@ sealed class WorkflowDocument
 		return true;
 	}
 
+	/// <summary>Marks a selected FlowStep or FlowDecision as the Flowchart entry node.
+	/// This is intentionally explicit: insertion order is only a convenience default and
+	/// must not prevent editing a graph whose execution starts in the middle.</summary>
+	public bool SetFlowStart(string elementId)
+	{
+		if (TryFindFlowDecision(elementId, out var decision, out var flowchartPath) && Find(flowchartPath) is Flowchart decisionFlowchart) {
+			decisionFlowchart.StartNode = decision;
+			return true;
+		}
+		var activity = Find(elementId);
+		if (activity == null) return false;
+		foreach (var flowchart in Flowcharts(Root)) {
+			var step = flowchart.Nodes.OfType<FlowStep>().FirstOrDefault(candidate => ReferenceEquals(candidate.Action, activity));
+			if (step == null) continue;
+			flowchart.StartNode = step;
+			return true;
+		}
+		return false;
+	}
+
 	/// <summary>Clears an explicitly selected Flowchart edge without deleting either endpoint.</summary>
 	public bool DisconnectFlow(string sourceId, string branch)
 	{
@@ -1017,6 +1211,27 @@ sealed class WorkflowDocument
 		if (activity is Flowchart flowchart) yield return flowchart;
 		foreach (var child in WorkflowInspectionServices.GetActivities(activity))
 			foreach (var nested in Flowcharts(child)) yield return nested;
+	}
+
+	/// <summary>Moves an Activity one place within its owning collection. This intentionally
+	/// excludes synthetic State/Transition/Flowchart nodes: their ordering or graph edges carry
+	/// additional semantics and must use their dedicated editors instead.</summary>
+	public string? MoveSibling(string id, int offset)
+	{
+		if (offset is not (-1 or 1)) return null;
+		var separator = id.LastIndexOf('.');
+		var parentId = separator < 0 ? "" : id[..separator];
+		var parent = Find(parentId);
+		var target = Find(id);
+		if (parent == null || target == null) return null;
+		var collectionProperty = FindActivityCollectionProperty(parent.GetType());
+		if (collectionProperty?.GetValue(parent) is not System.Collections.IList collection) return null;
+		var index = collection.IndexOf(target);
+		var destination = index + offset;
+		if (index < 0 || destination < 0 || destination >= collection.Count) return null;
+		collection.RemoveAt(index);
+		collection.Insert(destination, target);
+		return parentId.Length == 0 ? destination.ToString() : parentId + "." + destination;
 	}
 
 	static PropertyInfo? FindActivityCollectionProperty(Type activityType) =>

@@ -9,7 +9,8 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.v3" Version="3.2.1" />
     <ProjectReference Include="..\WorkflowDesigner.Host\WorkflowDesigner.Host.csproj" />
+    <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Remote/Designer.Remote.csproj" />
   </ItemGroup>
 </Project>

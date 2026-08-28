@@ -1,0 +1,28 @@
+<Solution>
+  <Folder Name="/Perf/">
+    <Project Path="Perf/CoreWf.Benchmarks/CoreWf.Benchmarks.csproj" />
+    <Project Path="Perf/Perf.AssemblyReference.Benchmarks/Perf.AssemblyReference.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+    <File Path="editorconfig" />
+  </Folder>
+  <Folder Name="/Test/">
+    <File Path="Test/Directory.Build.props" />
+    <Project Path="Test/CustomTestObjects/CustomTestObjects.csproj" />
+    <Project Path="Test/ImperativeTestCases/ImperativeTestCases.csproj" />
+    <Project Path="Test/System.Xaml.TestCases/System.Xaml.TestCases.csproj" />
+    <Project Path="Test/TestCases.Activities/TestCases.Activities.csproj" />
+    <Project Path="Test/TestCases.Runtime/TestCases.Runtime.csproj" />
+    <Project Path="Test/TestCases.Workflows/TestCases.Workflows.csproj" />
+    <Project Path="Test/TestCases.Xaml/TestCases.Xaml.csproj" />
+    <Project Path="Test/TestConsole/TestConsole.csproj" />
+    <Project Path="Test/TestObjects/TestObjects.csproj" />
+    <Project Path="Test/WorkflowApplicationTestExtensions/WorkflowApplicationTestExtensions.csproj" />
+  </Folder>
+  <Project Path="CoreWf.EtwTracking/System.Activities.EtwTracking.csproj" />
+  <Project Path="System.Xaml/System.Xaml.csproj" />
+  <Project Path="UiPath.Workflow.Runtime/UiPath.Workflow.Runtime.csproj" />
+  <Project Path="UiPath.Workflow/UiPath.Workflow.csproj" />
+  <Project Path="VisualBasic/Microsoft.CodeAnalysis.VisualBasic.Scripting.vbproj" />
+</Solution>

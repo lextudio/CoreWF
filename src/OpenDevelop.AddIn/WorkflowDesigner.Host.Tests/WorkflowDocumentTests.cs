@@ -115,9 +115,13 @@ public sealed class WorkflowDocumentTests
 			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence()).ToXaml() } }
 		});
 		Assert.True(service.ValidateExpression("session", "document", "=1 + 2").IsValid);
-		Assert.False(service.ValidateExpression("session", "document", "=1 +").IsValid);
+		var csharpError = service.ValidateExpression("session", "document", "=1 +");
+		Assert.False(csharpError.IsValid);
+		Assert.Contains(csharpError.Details, detail => detail.Code.StartsWith("CS", StringComparison.Ordinal) && detail.Line == 1 && detail.Column >= 1);
 		Assert.True(service.ValidateExpression("session", "document", "=vb:1 + 2").IsValid);
-		Assert.False(service.ValidateExpression("session", "document", "=vb:1 +").IsValid);
+		var visualBasicError = service.ValidateExpression("session", "document", "=vb:1 +");
+		Assert.False(visualBasicError.IsValid);
+		Assert.Contains(visualBasicError.Details, detail => detail.Code.StartsWith("BC", StringComparison.Ordinal) && detail.Line == 1 && detail.Column >= 1);
 	}
 
 	[Fact]
@@ -291,6 +295,24 @@ public sealed class WorkflowDocumentTests
 	}
 
 	[Fact]
+	public void Flowchart_start_node_can_be_explicitly_changed_to_a_step_or_decision()
+	{
+		var document = Load(new Flowchart());
+		Assert.Equal("0", document.AddChild("", "WriteLine"));
+		Assert.Equal("1", document.AddChild("", "WriteLine"));
+		Assert.Equal("$decision-2", document.AddChild("", "FlowDecision"));
+		var flowchart = (Flowchart)document.Root!;
+		Assert.True(document.SetFlowStart("1"));
+		Assert.Same(Assert.IsType<FlowStep>(flowchart.Nodes[1]), flowchart.StartNode);
+		Assert.True(document.SetFlowStart("$decision-2"));
+		Assert.Same(Assert.IsType<FlowDecision>(flowchart.Nodes[2]), flowchart.StartNode);
+		var reloaded = new WorkflowDocument();
+		reloaded.Reset(document.ToXaml());
+		Assert.True(reloaded.LastParseSucceeded, reloaded.Error);
+		Assert.IsType<FlowDecision>(((Flowchart)reloaded.Root!).StartNode);
+	}
+
+	[Fact]
 	public void Flowchart_edges_can_be_disconnected_without_deleting_nodes()
 	{
 		var document = Load(new Flowchart());
@@ -401,10 +423,100 @@ public sealed class WorkflowDocumentTests
 	}
 
 	[Fact]
+	public void Project_activity_toolbox_entries_honor_standard_component_model_metadata()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			ProjectAssemblyPath = typeof(MetadataActivity).Assembly.Location,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence()).ToXaml() } }
+		});
+
+		var item = Assert.Single(service.GetCapabilities("session", "document").Toolbox, item => item.TypeName.StartsWith(typeof(MetadataActivity).FullName!, StringComparison.Ordinal));
+		Assert.Equal("Send customer notification", item.DisplayName);
+		Assert.Equal("Business activities", item.Category);
+		Assert.Equal("Sends a notification using the current workflow context.", item.Template);
+		Assert.Equal(typeof(MetadataActivity).Namespace, item.XamlNamespace);
+	}
+
+	[Fact]
+	public void Refreshing_project_capabilities_preserves_the_open_workflow_document()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence()).ToXaml() } }
+		});
+		state = service.AddElement("session", "document", state.Version, "", new DesignerToolboxItemInfo { TypeName = "Delay" }, "", 0, 0);
+
+		var capabilities = service.RefreshCapabilities("session", "document", new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = state.Version,
+			ProjectAssemblyPath = typeof(MetadataActivity).Assembly.Location
+		});
+
+		Assert.Contains(capabilities.Toolbox, item => item.TypeName.StartsWith(typeof(MetadataActivity).FullName!, StringComparison.Ordinal));
+		var current = service.GetDebugState("session", "document");
+		Assert.False(current.IsRunning);
+		Assert.Equal(state.Version, service.Flush("session", "document", state.Version).BaseVersion);
+		Assert.Contains("Delay", service.Flush("session", "document", state.Version).Files[0].Text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Enum_properties_are_projected_as_finite_choices_and_round_trip()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new EnumActivity()).ToXaml() } }
+		});
+		var mode = Assert.Single(state.Tree!.Properties, property => property.Name == nameof(EnumActivity.Mode));
+		Assert.Equal("Enum", mode.Kind);
+		Assert.Equal(new[] { nameof(EnumMode.Normal), nameof(EnumMode.Urgent) }, mode.AllowedValues);
+		Assert.Equal("Delivery priority", mode.DisplayName);
+		Assert.Equal("Delivery", mode.Category);
+		Assert.Equal("Controls how the activity is dispatched.", mode.Description);
+		Assert.DoesNotContain(state.Tree.Properties, property => property.Name == nameof(EnumActivity.HiddenImplementationDetail));
+		state = service.SetProperty("session", "document", state.Version, "", nameof(EnumActivity.Mode), nameof(EnumMode.Urgent));
+		Assert.Equal(nameof(EnumMode.Urgent), Assert.Single(state.Tree!.Properties, property => property.Name == nameof(EnumActivity.Mode)).Value);
+		Assert.Throws<ArgumentException>(() => service.SetProperty("session", "document", state.Version, "", nameof(EnumActivity.Mode), "NotARealMode"));
+	}
+
+	[Fact]
 	public void A_loaded_workflow_can_execute_with_the_corewf_runtime()
 	{
 		var document = Load(new Sequence());
 		Assert.Empty(WorkflowInvoker.Invoke(document.Root!));
+	}
+
+	[Fact]
+	public void Workflow_validation_reports_model_errors_without_executing()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "document", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence { Activities = { new If() } }).ToXaml() } } });
+		var result = service.ValidateWorkflow("session", "document", 1);
+		Assert.False(result.IsValid);
+		Assert.NotEmpty(result.Diagnostics);
+		Assert.Contains(result.Diagnostics, diagnostic => !diagnostic.IsWarning && !string.IsNullOrWhiteSpace(diagnostic.Message));
+		Assert.Contains(result.Diagnostics, diagnostic => diagnostic.ElementId == "0");
+	}
+
+	[Fact]
+	public void Run_accepts_declared_workflow_inputs_and_rejects_invalid_values()
+	{
+		var workflow = Load(new Sequence());
+		Assert.True(workflow.AddArgument("count", "Int32", ""));
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "document", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = workflow.ToXaml() } } });
+		var result = service.Run("session", "document", 1, new Dictionary<string, string> { ["count"] = "42" });
+		Assert.True(result.Succeeded, result.Message);
+		var invalid = service.Run("session", "document", 1, new Dictionary<string, string> { ["count"] = "not-a-number" });
+		Assert.False(invalid.Succeeded);
+		Assert.Contains("valid Int32", invalid.Message);
 	}
 
 	[Fact]
@@ -441,6 +553,7 @@ public sealed class WorkflowDocumentTests
 		var service = new WorkflowDesignerHostService("aa");
 		service.Initialize("aa", DesignerProtocol.Version, "session");
 		var workflow = Load(new Sequence { Activities = { new Delay { Duration = TimeSpan.FromMilliseconds(200) } } });
+		Assert.True(workflow.AddArgument("count", "Int32", ""));
 		service.Open(new DesignerDocumentSnapshot {
 			SessionId = "session", DocumentId = "document", Version = 1,
 			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = workflow.ToXaml() } }
@@ -448,11 +561,38 @@ public sealed class WorkflowDocumentTests
 		var breakpoint = service.ToggleBreakpoint("session", "document", "0");
 		Assert.Contains("0", breakpoint.BreakpointElementIds);
 
-		var running = Task.Run(() => service.Run("session", "document", 1));
+		var running = Task.Run(() => service.Run("session", "document", 1, new Dictionary<string, string> { ["count"] = "42" }));
 		Assert.True(SpinWait.SpinUntil(() => service.GetDebugState("session", "document").IsPaused, TimeSpan.FromSeconds(3)));
 		var paused = service.GetDebugState("session", "document");
 		Assert.Equal("0", paused.CurrentElementId);
+		Assert.Equal("42", paused.Inputs["count"]);
+		Assert.Collection(paused.CallStack,
+			frame => { Assert.Equal("", frame.ElementId); Assert.Equal("Sequence", frame.TypeName); },
+			frame => { Assert.Equal("0", frame.ElementId); Assert.Equal("Delay", frame.TypeName); });
+		Assert.Contains(paused.Trace, entry => entry.Contains("Executing", StringComparison.Ordinal));
 		Assert.True(service.ContinueRun("session", "document"));
+		Assert.True((await running).Succeeded);
+	}
+
+	[Fact]
+	public async Task An_idle_workflow_exposes_and_resumes_external_bookmarks()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new BookmarkActivity()).ToXaml() } }
+		});
+
+		var running = Task.Run(() => service.Run("session", "document", 1));
+		var observed = SpinWait.SpinUntil(() => service.GetDebugState("session", "document").Bookmarks.Any(bookmark => bookmark.Name == "continue"), TimeSpan.FromSeconds(3));
+		Assert.True(observed, running.IsCompleted ? "Run completed before exposing a bookmark: " + (await running).Message : "Workflow did not become idle with its bookmark.");
+		var waiting = service.GetDebugState("session", "document");
+		Assert.True(waiting.IsRunning);
+		Assert.True(waiting.IsIdle);
+		Assert.False(running.IsCompleted, "An idle workflow must remain active until its bookmark is resumed or it is stopped.");
+		Assert.Contains(waiting.Bookmarks, bookmark => bookmark.Name == "continue" && bookmark.OwnerDisplayName == "Wait for host");
+		Assert.True(service.ResumeBookmark("session", "document", "continue", "payload"));
 		Assert.True((await running).Succeeded);
 	}
 
@@ -816,6 +956,12 @@ public sealed class WorkflowDocumentTests
 		Assert.IsType<Delay>(reloaded.Find("$state-0.$transition-0.0"));
 		Assert.IsType<WriteLine>(reloaded.Find("$state-0.$transition-0.1"));
 		Assert.Contains("true", reloaded.ToXaml(), StringComparison.OrdinalIgnoreCase);
+		Assert.True(reloaded.SetProperty("$state-0.$transition-0", "$target", ""));
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "document", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", Text = reloaded.ToXaml() } } });
+		var transition = Assert.Single(Assert.Single(state.Tree!.Children, node => node.Id == "$state-0").Children, node => node.Type == "Transition");
+		Assert.Equal("", Assert.Single(transition.Properties, property => property.Name == "$target").Value);
 		Assert.True(reloaded.Remove("$state-0.$transition-0"));
 	}
 
@@ -1057,6 +1203,108 @@ public sealed class WorkflowDocumentTests
 		Assert.True(result.Succeeded, result.Message);
 	}
 
+	[Fact]
+	public void Copied_activity_subtrees_are_detached_and_paste_through_the_versioned_host_protocol()
+	{
+		var document = Load(new Sequence());
+		Assert.Equal("0", document.AddChild("", "Sequence"));
+		Assert.Equal("0.0", document.AddChild("0", "WriteLine"));
+		Assert.True(document.SetProperty("0", "$displayName", "Original branch"));
+		Assert.True(document.SetProperty("0.0", "$displayName", "Nested action"));
+
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "document", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = document.ToXaml() } } });
+		Assert.True(service.CopyElements("session", "document", new[] { "0", "0.0" }));
+		state = service.PasteElements("session", "document", state.Version, "");
+
+		Assert.Equal("1", state.CreatedElementId);
+		var pasted = Assert.Single(state.Tree!.Children, node => node.Id == "1");
+		Assert.Equal("Original branch", pasted.Name);
+		Assert.Equal("Nested action", Assert.Single(pasted.Children).Name);
+		Assert.True(state.CanUndo);
+
+		state = service.Undo("session", "document", state.Version);
+		Assert.DoesNotContain(state.Tree!.Children, node => node.Id == "1");
+	}
+
+	[Fact]
+	public void Multi_item_paste_is_atomic_when_a_structured_destination_runs_out_of_slots()
+	{
+		var document = Load(new Sequence());
+		Assert.Equal("0", document.AddChild("", "WriteLine"));
+		Assert.Equal("1", document.AddChild("", "WriteLine"));
+		Assert.Equal("2", document.AddChild("", "If"));
+		Assert.True(document.Copy(new[] { "0", "1" }));
+
+		Assert.Null(document.Paste("2"));
+		var conditional = Assert.IsType<If>(document.Find("2"));
+		Assert.Null(conditional.Then);
+		Assert.Null(conditional.Else);
+	}
+
+	[Fact]
+	public void Host_scoped_clipboard_pastes_between_open_workflow_documents()
+	{
+		var source = Load(new Sequence());
+		Assert.Equal("0", source.AddChild("", "WriteLine"));
+		Assert.True(source.SetProperty("0", "$displayName", "Copied from another document"));
+		var destination = Load(new Sequence());
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "source", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", Text = source.ToXaml() } } });
+		var state = service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "destination", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", Text = destination.ToXaml() } } });
+
+		Assert.True(service.CopyElements("session", "source", new[] { "0" }));
+		state = service.PasteElements("session", "destination", state.Version, "");
+		Assert.Equal("0", state.CreatedElementId);
+		Assert.Equal("Copied from another document", Assert.Single(state.Tree!.Children).Name);
+	}
+
+	[Fact]
+	public void Multi_selection_deletion_and_cut_are_ancestor_aware_atomic_history_operations()
+	{
+		var document = Load(new Sequence());
+		Assert.Equal("0", document.AddChild("", "Sequence"));
+		Assert.Equal("0.0", document.AddChild("0", "WriteLine"));
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "document", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", Text = document.ToXaml() } } });
+
+		state = service.DeleteElements("session", "document", state.Version, new[] { "0", "0.0" });
+		Assert.Empty(state.Tree!.Children);
+		state = service.Undo("session", "document", state.Version);
+		Assert.Equal("WriteLine", Assert.Single(Assert.Single(state.Tree!.Children).Children).Type);
+
+		state = service.CutElements("session", "document", state.Version, new[] { "0", "0.0" });
+		Assert.Empty(state.Tree!.Children);
+		state = service.PasteElements("session", "document", state.Version, "");
+		Assert.Equal("0", state.CreatedElementId);
+		Assert.Equal("WriteLine", Assert.Single(Assert.Single(state.Tree!.Children).Children).Type);
+	}
+
+	[Fact]
+	public void Collection_activity_reordering_updates_the_structural_path_and_undo_history()
+	{
+		var document = Load(new Sequence());
+		Assert.Equal("0", document.AddChild("", "WriteLine"));
+		Assert.Equal("1", document.AddChild("", "WriteLine"));
+		Assert.Equal("2", document.AddChild("", "WriteLine"));
+		Assert.True(document.SetProperty("0", "$displayName", "first"));
+		Assert.True(document.SetProperty("1", "$displayName", "second"));
+		Assert.True(document.SetProperty("2", "$displayName", "third"));
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot { SessionId = "session", DocumentId = "document", Version = 1, Files = { new DesignerSourceFileSnapshot { Kind = "Designer", Text = document.ToXaml() } } });
+
+		state = service.MoveElement("session", "document", state.Version, "1", -1);
+		Assert.Equal("0", state.CreatedElementId);
+		Assert.Equal(new[] { "second", "first", "third" }, state.Tree!.Children.Select(node => node.Name));
+		state = service.Undo("session", "document", state.Version);
+		Assert.Equal(new[] { "first", "second", "third" }, state.Tree!.Children.Select(node => node.Name));
+		Assert.Throws<InvalidOperationException>(() => service.MoveElement("session", "document", state.Version, "0", -1));
+	}
+
 	static WorkflowDocument Load(Activity activity)
 	{
 		var builder = new ActivityBuilder { Name = "TestWorkflow", Implementation = activity };
@@ -1071,3 +1319,26 @@ public sealed class WorkflowDocumentTests
 }
 
 public sealed class ExpressionModel { public string Title { get; set; } = ""; }
+
+[System.ComponentModel.DisplayName("Send customer notification")]
+[System.ComponentModel.Category("Business activities")]
+[System.ComponentModel.Description("Sends a notification using the current workflow context.")]
+public sealed class MetadataActivity : Activity { }
+
+public enum EnumMode { Normal, Urgent }
+public sealed class EnumActivity : Activity {
+	[System.ComponentModel.DisplayName("Delivery priority")]
+	[System.ComponentModel.Category("Delivery")]
+	[System.ComponentModel.Description("Controls how the activity is dispatched.")]
+	public EnumMode Mode { get; set; } = EnumMode.Normal;
+	[System.ComponentModel.Browsable(false)]
+	public bool HiddenImplementationDetail { get; set; }
+}
+
+public sealed class BookmarkActivity : NativeActivity
+{
+	public BookmarkActivity() => DisplayName = "Wait for host";
+	protected override bool CanInduceIdle => true;
+	protected override void Execute(NativeActivityContext context) => context.CreateBookmark("continue", OnResume);
+	void OnResume(NativeActivityContext context, Bookmark bookmark, object value) { }
+}

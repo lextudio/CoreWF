@@ -4,6 +4,9 @@
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Remote/Designer.Remote.csproj" />
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Server/Designer.Server.csproj" />
     <ProjectReference Include="../../UiPath.Workflow/UiPath.Workflow.csproj" />
+	<PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="$(RoslynPackageVersion)" />
+	<PackageReference Include="Microsoft.CodeAnalysis.CSharp.Features" Version="$(RoslynPackageVersion)" />
+	<PackageReference Include="Microsoft.CodeAnalysis.VisualBasic.Workspaces" Version="$(RoslynPackageVersion)" />
   </ItemGroup>
   <Target Name="DeployToAddIns" AfterTargets="Build"><ItemGroup><HostOutput Include="$(TargetDir)**" /></ItemGroup><Copy SourceFiles="@(HostOutput)" SkipUnchangedFiles="true" DestinationFiles="@(HostOutput->'$(OpenDevelopRoot)AddIns\DisplayBindings\WorkflowDesigner\Host\%(RecursiveDir)%(Filename)%(Extension)')" /></Target>
 </Project>

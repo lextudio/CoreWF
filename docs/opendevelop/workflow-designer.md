@@ -6,6 +6,29 @@ its tests, and its CoreWF runtime dependency are versioned here under
 integration target is `/Applications/OpenDevelop.app` on macOS; set `OPENDEVELOP_APP_PATH` to
 test another installed application binary.
 
+## Installed-application verification
+
+`WorkflowDesigner.IntegrationTests` first opens the external `WorkflowDesigner.csproj` in the
+installed OpenDevelop parent. The Addin SDK then launches an isolated child from that project with
+`-addindir:<CoreWF build output>`—the addin is deliberately **not** copied into the installed
+application's `AddIns` tree. The suite assigns that child a dedicated DevFlow port, so it can drive
+the actual external addin, its secondary **Design** view, and the OOP CoreWF host.
+
+It validates and runs an unmodified `Sequence`/`WriteLine` workflow, verifies CoreWF tracking,
+and debugs a `Delay` through pause, step, and continue. It then exercises toolbox insertion plus
+undo/redo in the same child instance. The `od.workflow-designer.*` actions drive real view/host
+paths; they are not a second workflow model or a test-only host. Run it with:
+
+```bash
+dotnet run --project src/OpenDevelop.AddIn/WorkflowDesigner.IntegrationTests/WorkflowDesigner.IntegrationTests.csproj \
+  -c Debug --no-restore -- -parallel none
+```
+
+The fixture automatically selects `/Applications/OpenDevelop.app`, forwards that resolved path to
+the parent add-in host, and uses its test-only DevFlow port. Set `OPENDEVELOP_APP_PATH` only to
+test another installed application binary; `OPENDEVELOP_ADDIN_TEST_DEVFLOW_PORT` remains an
+optional override for the test port.
+
 Tracking note for [orosandrei/Rehosted-Workflow-Designer#21](https://github.com/orosandrei/Rehosted-Workflow-Designer/issues/21)
 ("Integration with OpenDevelop and LibreWPF"), opened by this repo's maintainer against their own
 WF rehosting sample project. That issue also asks to fold in
@@ -148,19 +171,45 @@ Scope carried over from the earlier draft, still true:
    and `DesignerCommandController` for the Delete command — instead of the hand-rolled
    event-wiring an earlier draft of this file used, so it doesn't start life as a sixth
    almost-identical copy of that plumbing. Versioned CoreWF XAML history powers standard
-   Undo/Redo, and toolbox insertion supports both double-click and drag/drop. The workflow-level
-   Arguments panel is also live: it projects the `ActivityBuilder` properties, creates, deletes,
+   Undo/Redo, and toolbox insertion supports both double-click and drag/drop. Standard **Cut**,
+   **Copy** and **Paste** also operate through the isolated host: copied Activity subtrees are serialized
+   and reloaded as detached CoreWF objects before being inserted, so nested activities and their
+   editable values are preserved without sharing a live object graph with the source. Paste uses
+   the same collection/slot/delegate validation as a toolbox drop, rejecting incompatible targets
+   instead of corrupting a structured workflow. Multi-selection deletion/cut ignores descendants
+   whose ancestor is already selected and rolls the complete operation back if any selected root
+   cannot be removed.
+   **Ctrl+A** selects the current workflow tree for bulk property/delete operations (while text
+   editors retain their normal select-all behavior), and **Ctrl+D** deep-copies a selected
+   non-root Activity into its current parent using the same isolated-host clipboard path.
+   **Move Up** and **Move Down** reorder a selected direct child of a normal Activity collection
+   (such as Sequence or Parallel), update its path-based selection after the index changes, and
+   participate in the same versioned undo/redo history. Graph/StateMachine-specific ordering is
+   intentionally left to their own topology editors rather than treated as a generic list. The
+   workflow-level Arguments panel is also live: it projects the `ActivityBuilder` properties, creates, deletes,
    renames, retargets argument types and edits literal defaults through the host, and every mutation participates in the
    same history. A root-scope Variables panel provides the same create/delete/rename/type/default,
    versioned and undoable baseline for activities that expose a CoreWF `Variables` collection.
    Nested scope, custom-activity discovery and the supported literal/variable/C#/VB expression
-   forms are now implemented. The `Expression…` command opens a multi-line editor for every
-   writable selected property. The editor validates C# and VB syntax and semantic references through
+   forms are now implemented.
+
+   **Validate** uses CoreWF's model validation without executing the workflow. Failures and
+   warnings appear in a dedicated result list with their workflow path/property; double-clicking
+   a diagnostic (or pressing Enter) returns focus to the corresponding activity on the canvas.
+   The compact status text remains for a quick success/failure summary. Following an edit, the
+   designer also performs a debounced background validation: invalid activity borders turn red,
+   warnings turn gold, and the status bar reports the current error/warning count without stealing
+   focus or opening a dialog.
+
+   The `Expression…` command opens a multi-line editor for every writable selected property. The editor validates C# and VB syntax and semantic references through
    the host, including workflow variables, the project output and resolved project assemblies.
    It also offers lightweight contextual completion for workflow variables, CoreWF types and
    C#/VB language terms. Public types from the project output and its resolved references are
    enumerated through Roslyn metadata (without loading the user's assemblies), so selecting a
    completion produces a usable fully-qualified type name. Full Roslyn IntelliSense remains step 4 work.
+   **Ctrl+F** opens the workflow search surface. It filters by activity type, DisplayName,
+   structural path and projected property names/values; double-clicking a match or pressing Enter
+   selects that exact node in the canvas and the shared Outline/Properties pads.
 4. **Toolbox + additional activity shapes**: `If` and a baseline `Flowchart` are available from
    the toolbox. Dropping into a Flowchart creates a CoreWF `FlowStep`, wires it after the previous
    step and sets the first step as `StartNode`; deleting a step reconnects its predecessor.
@@ -169,7 +218,7 @@ Scope carried over from the earlier draft, still true:
    node with an editable condition and explicit True/False branch connectors; when inserted after
    a linear run it is automatically linked from that run's final unconnected `FlowStep`, while
    its outgoing branches must be chosen explicitly.
-   The current sequential links are visibly marked between Flowchart steps. Select a source then
+   The current sequential links are visibly marked with labelled arrowheads between Flowchart steps. Select a source then
    use **Connect** (or **True →**/**False →** for a decision) to arm a connection, and click its
    target step; `Esc` cancels the gesture. The previous Ctrl-click-two-nodes interaction remains
    available. `Connect` rewires a `FlowStep.Next` edge (cycles are rejected until loop semantics
@@ -182,6 +231,8 @@ Scope carried over from the earlier draft, still true:
    target node to create that edge; the armed source/target gesture remains available as a
    keyboard/mouse-accessible alternative. **Clear Next**, **Clear True**, and **Clear False**
    remove the selected source edge without deleting either node, participating in normal undo/redo.
+   **Set Start** makes the selected FlowStep or FlowDecision the explicit Flowchart entry node;
+   insertion order remains only the default for newly created graphs.
    **Auto Layout** discards hand-positioned coordinates and restores the stable default grid.
    Deleting a `FlowDecision` disconnects all incoming step/branch edges rather than retaining a
    reference to a removed CoreWF node; it never guesses which of the decision's two branches should
@@ -192,11 +243,22 @@ Scope carried over from the earlier draft, still true:
    the filter). The document snapshot now carries the managed project output; the host reflects
    safe, default-constructible `Activity` types from it into a Project category and also honors
    DLLs copied beside the already-built project output are supplied as Referenced activity entries
-   without running MSBuild on the workbench dispatcher. This follows
+   without running MSBuild on the workbench dispatcher. When the owning project builds
+   successfully, the open designer refreshes this catalog in place: it sends only refreshed
+   project/reference metadata to the isolated host, preserving unsaved workflow XAML, selection,
+   undo history and breakpoints while newly built custom Activity types become available. This follows
    designer-common.md's shared project-type catalog contract: interface designers apply the same
    transport to custom Controls/FrameworkElements, while Workflow applies it to Activities. This
    is the CoreWF equivalent of the upstream sample's `ActivityLibraries/` probing. The toolbox
    summary makes the active/total and Project/Referenced discovery counts visible while filtering.
+   Custom activities can use the ordinary .NET `DisplayNameAttribute`, `CategoryAttribute`, and
+   `DescriptionAttribute`; the host carries those values over DDP so the toolbox shows a useful
+   name, grouping, and tooltip without requiring an OpenDevelop-only reference.
+   Scalar enum properties on custom activities are also projected as finite Property-pad choices,
+   so activity authors do not need a designer-specific editor merely to avoid free-form strings.
+   The same projection honors property-level `DisplayNameAttribute`, `CategoryAttribute`,
+   `DescriptionAttribute`, `ReadOnlyAttribute`, and `BrowsableAttribute`, making the ordinary
+   component-model contract sufficient for most custom Activity property panes.
    In `ProjectCodeMode=Disabled` safe mode the host exposes only CoreWF's built-in catalog and
    never loads a project or reference DLL.
    The property pad accepts `@variableName` for compatible `InArgument<T>`/`OutArgument<T>`/
@@ -273,7 +335,9 @@ docs below. Concrete conventions to replicate, most-to-least load-bearing:
   before starting a workflow that requires expression compilation. It never pretends that editor
   validation means that expression execution is available. This boundary also keeps the expression
   compiler out of the OpenDevelop process.
-  **Complete** supplies matching workflow variables and readable workflow arguments, CoreWF activity types, public project/reference
+  **Complete** runs Roslyn's real `CompletionService` in the isolated Workflow host against a
+  temporary expression document with the same metadata references and lexical workflow symbols;
+  the existing metadata-only catalog remains a deployment-safe fallback. It supplies matching workflow variables and readable workflow arguments, CoreWF activity types, public project/reference
   types (as fully-qualified names, read through Roslyn metadata without loading the DLLs) and language terms and
   inserts a selected result at the caret; after `Math.`, `DateTime.` and the language's string type
   it also supplies matching public static members (for example `Math.Abs`), including fully-qualified
@@ -286,6 +350,10 @@ docs below. Concrete conventions to replicate, most-to-least load-bearing:
   extension shapes such as `Where`, `Select` and `OrderBy` in this lightweight completion list;
   expression validation otherwise retains its explicit compilation context and does not imply
   an automatic project-wide import set.
+- **Workflow validation**: the command strip's **Validate** command calls CoreWF's
+  `ActivityValidationServices` in the isolated host without executing the workflow. Errors and
+  warnings are returned with their structural activity path; the first navigable violation is
+  selected on the canvas and the diagnostic bar shows the resulting summary.
 - **Toolbox interaction details — done** ([`how-to-add-activities-to-the-toolbox.md`](https://github.com/MicrosoftDocs/visualstudio-docs/blob/main/docs/workflow-designer/how-to-add-activities-to-the-toolbox.md)):
   empty containers now show **"Drop activity here"** hint text instead of rendering blank, and an
   activity's `DisplayName` is directly editable on its header via double-click (a `TextBlock` that
@@ -327,6 +395,10 @@ docs below. Concrete conventions to replicate, most-to-least load-bearing:
   nodes. **State** creates and selects the initial state when needed; its DisplayName, final
   flag and Initial selection are editable (selecting Initial moves the single initial state), and
   normal toolbox insertion fills its Entry then Exit activity slots.
+  The StateMachine design surface is rendered as a state graph: the initial state has a green
+  entry marker, final states carry a terminal marker, and labelled arrowed transition edges show the
+  real target relationships. State cards support the same Shift-drag position persistence used
+  by Flowchart nodes, without adding design-only coordinates to CoreWF XAML.
   Final states reject Exit and Transition insertion, and a State cannot be marked final until an
   existing Exit/Transition has been removed, matching CoreWF's validation rules before runtime.
   When deleting the current initial State, the designer selects another non-final State when one
@@ -335,6 +407,8 @@ docs below. Concrete conventions to replicate, most-to-least load-bearing:
   into ordinary activity children. **Transition** creates stable child nodes under its source
   state; its target is selected by State name in the expression editor (persisted as its stable
   `$state-<index>` node id), and its Trigger then Action slots accept normal toolbox activities.
+  The State graph also supports **Set State Target**: select a Transition, arm the command and
+  click a State card to create or retarget that edge; **Clear State Target** disconnects it.
   Removing a transition or either slot mutates the matching
   CoreWF object; removing a target state safely disconnects inbound transitions.
   A transition is event-driven: a `Delay` Trigger (zero duration by default) provides a simple
@@ -367,8 +441,10 @@ docs tree above when implementing that activity's box in step 4 — each documen
 property surface and designer-specific behavior (e.g. `Flowchart`'s connector gestures).
 5. **CoreWF execution/tracking integration** for #18, independent of 2–4 and shippable on all
    platforms once the runtime dependency from step 2 is in place. The execution baseline is now
-   live: **Run** asks the isolated host to invoke the current `Activity` with `WorkflowInvoker`
-   and reports completion, output values, or the underlying runtime/validation error in the
+ live: **Run** opens a typed input dialog for declared `In`/`InOut` workflow arguments, then asks
+ the isolated host to materialize the `ActivityBuilder` as a `DynamicActivity` and invoke it with
+ those values. This preserves root arguments rather than accidentally running only the builder's
+ implementation activity. The host reports completion, output values, or the underlying runtime/validation error in the
    designer diagnostic bar. It also returns CoreWF `ActivityStateRecord` events (shown as a
    compact activity/state trace). Run is asynchronous in the addin and **Stop** aborts the active
   `WorkflowApplication` through the host. The activity-tree command strip also provides
@@ -379,7 +455,21 @@ property surface and designer-specific behavior (e.g. `Flowchart`'s connector ge
    the current parent scope is left. The paused activity is selected in the designer and breakpoints are
    visibly marked. Virtual handler paths for `Switch` cases/default and `TryCatch` handlers are
    resolved to their real runtime activities too, so breakpoints inside these designer-only branch
-   nodes pause at the correct selected element. This is workflow-level stepping, not yet DAP source-level step-in/over/out or
+   nodes pause at the correct selected element. A paused state also carries a transport-only,
+   structural call stack (root through the selected activity, including virtual branch nodes), which
+   the parent displays in the diagnostic strip and automation can inspect without receiving CoreWF
+   runtime objects. It also includes the materialized root `In`/`InOut` input arguments as a safe
+   baseline Variables view; arbitrary lexical CoreWF variables remain deliberately opaque until a
+   dedicated runtime inspection mechanism can expose them safely. The same paused snapshot includes
+   the activity tracking records observed so far, allowing a user or automation client to inspect
+   execution progress before resuming. When the instance is idle on external work, it also exposes
+   available Bookmark names/owners. **Resume Bookmark** selects one and supplies an optional string
+   payload through `WorkflowApplication.ResumeBookmark`, enabling custom event-driven activities to
+   continue without a separate test host. An Idle workflow with external Bookmarks is treated as a
+   valid host wait rather than being aborted after an arbitrary timeout; it runs until a Bookmark is
+   resumed or the user chooses **Stop**. Its debugger state is explicitly marked Idle (distinct
+   from a breakpoint pause), and the diagnostic strip lists the available Bookmark names. This is
+   workflow-level stepping, not yet DAP source-level step-in/over/out or
    editor breakpoint integration.
 6. **Non-Windows verification**: since the new addin targets net10.0 cross-platform rather than
    being Windows-gated, explicitly test load/render/edit/save on macOS (matching this repo's

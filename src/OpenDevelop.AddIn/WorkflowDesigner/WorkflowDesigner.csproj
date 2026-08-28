@@ -1,9 +1,16 @@
-<Project Sdk="LibreWPF.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../UnoDevelop/externals/OpenDevelop/'))</OpenDevelopRoot>
+    <!-- An external WorkflowDesigner is debugged in an installed OpenDevelop through the Addin
+         SDK's -addindir: launch, never by copying its output into the application bundle. -->
+    <OpenDevelopHostBin Condition="'$(OpenDevelopHostBin)' == '' And '$(OPENDEVELOP_APP_PATH)' != ''">$([System.IO.Path]::GetDirectoryName('$(OPENDEVELOP_APP_PATH)'))/</OpenDevelopHostBin>
+    <OpenDevelopDebugDevFlowPort Condition="'$(OpenDevelopDebugDevFlowPort)' == '' And '$(OPENDEVELOP_ADDIN_TEST_DEVFLOW_PORT)' != ''">$(OPENDEVELOP_ADDIN_TEST_DEVFLOW_PORT)</OpenDevelopDebugDevFlowPort>
+    <!-- OpenDevelopAppFixture sets OD_TEST_MODE only for integration-test host processes. -->
+    <OpenDevelopDebugDevFlowPort Condition="'$(OpenDevelopDebugDevFlowPort)' == '' And '$(OD_TEST_MODE)' == '1'">9301</OpenDevelopDebugDevFlowPort>
     <OpenDevelopAddin>true</OpenDevelopAddin>
     <OpenDevelopAddinKind>InProcess</OpenDevelopAddinKind>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWPF>true</UseWPF>
     <AssemblyName>ICSharpCode.WorkflowDesigner</AssemblyName>
     <RootNamespace>ICSharpCode.WorkflowDesigner</RootNamespace>
@@ -15,10 +22,22 @@
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Base/Project/ICSharpCode.SharpDevelop.csproj" Private="false" />
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Core/Project/ICSharpCode.Core.csproj" Private="false" />
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/ICSharpCode.SharpDevelop.Widgets/Project/ICSharpCode.SharpDevelop.Widgets.csproj" Private="false" />
+    <ProjectReference Include="$(OpenDevelopRoot)src/Libraries/AvalonEdit/ICSharpCode.AvalonEdit/ICSharpCode.AvalonEdit.csproj" Private="false" />
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Remote/Designer.Remote.csproj" Private="false" />
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Shell/Designer.Shell.csproj" Private="false" />
     <ProjectReference Include="..\WorkflowDesigner.Host\WorkflowDesigner.Host.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" SkipGetTargetFrameworkProperties="true" />
+    <!-- DevFlow attributes are development/test instrumentation, matching the other designer
+         addins; the runtime agent is already supplied by the OpenDevelop Debug host. -->
+    <PackageReference Include="LeXtudio.DevFlow.Agent.Core" Version="0.2.3" Condition="'$(Configuration)' == 'Debug'" />
   </ItemGroup>
   <ItemGroup><None Include="WorkflowDesigner.addin" /></ItemGroup>
+  <ItemGroup>
+    <!-- Toolbar icons in the VS2017 Image Library's own pre-converted XAML vector format, embedded
+         into THIS assembly rather than added to the host's ICSharpCode.Core.Presentation resources:
+         they are needed only by this addin, which ships from its own repository, so the host must
+         neither carry them nor be rebuilt to add one. Same arrangement ILSpyAddIn uses for its
+         member icons - see its Icons/ folder and VsIconLoader.cs, which WorkflowIcons mirrors. -->
+    <EmbeddedResource Include="Icons\*.xaml" LogicalName="Icons.%(Filename)%(Extension)" />
+  </ItemGroup>
   <Import Project="$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets" Condition="Exists('$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets')" />
 </Project>

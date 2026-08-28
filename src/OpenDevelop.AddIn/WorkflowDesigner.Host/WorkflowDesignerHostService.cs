@@ -2,11 +2,14 @@ using System.Activities;
 using System.Activities.Expressions;
 using System.Activities.Statements;
 using System.Activities.Tracking;
+using System.Activities.Validation;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Completion;
+using Microsoft.CodeAnalysis.Host.Mef;
 using Microsoft.CodeAnalysis.VisualBasic;
 using ICSharpCode.SharpDevelop.Designer.Remote;
 using StreamJsonRpc;
@@ -18,6 +21,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	readonly string expectedToken;
 	readonly ManualResetEventSlim shutdown = new(false);
 	readonly DesignerDocumentRegistry<DocumentSession> documents = new();
+	List<string> clipboard = new();
 	string sessionId = "";
 
 	public WorkflowDesignerHostService(string expectedToken) => this.expectedToken = expectedToken;
@@ -40,7 +44,28 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerCapabilities GetCapabilities(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var snapshot = Get(documentId).Snapshot;
+		return Capabilities(Get(documentId).Snapshot);
+	}
+
+	[JsonRpcMethod("workflow/refresh-capabilities")]
+	public DesignerCapabilities RefreshCapabilities(string sessionId, string documentId, DesignerDocumentSnapshot snapshot)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		// A project build changes the activity assemblies, not the in-memory XAML document.
+		// Keep its undo history and unsaved edits intact while refreshing only the safe metadata
+		// consumed by the toolbox/expression catalog.
+		session.Snapshot.ProjectFileName = snapshot.ProjectFileName;
+		session.Snapshot.TargetFramework = snapshot.TargetFramework;
+		session.Snapshot.ProjectAssemblyPath = snapshot.ProjectAssemblyPath;
+		session.Snapshot.ReferencedAssemblyPaths = snapshot.ReferencedAssemblyPaths;
+		session.Snapshot.ProjectCodeMode = snapshot.ProjectCodeMode;
+		session.CompletionTypeNames = null;
+		return Capabilities(session.Snapshot);
+	}
+
+	DesignerCapabilities Capabilities(DesignerDocumentSnapshot snapshot)
+	{
 		return new DesignerCapabilities {
 			Runtime = "CoreWF ActivityBuilder", Version = typeof(Activity).Assembly.GetName().Version?.ToString() ?? "", SessionId = sessionId,
 			Toolbox = StandardActivities().Append(new DesignerToolboxItemInfo { Name = "State", DisplayName = "State", TypeName = "State", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "Transition", DisplayName = "Transition", TypeName = "Transition", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "FlowDecision", DisplayName = "Flow Decision", TypeName = "FlowDecision", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "Catch", DisplayName = "Catch (Exception)", TypeName = "Catch", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "PickBranch", DisplayName = "Pick Branch", TypeName = "PickBranch", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "ForEachInt32", DisplayName = "For Each (Int32)", TypeName = "ForEachInt32", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "ParallelForEachInt32", DisplayName = "Parallel For Each (Int32)", TypeName = "ParallelForEachInt32", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "SwitchInt32", DisplayName = "Switch (Int32)", TypeName = "SwitchInt32", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "SwitchCase", DisplayName = "Switch Case", TypeName = "SwitchCase", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "SwitchDefault", DisplayName = "Switch Default", TypeName = "SwitchDefault", Category = "CoreWF" }).Concat(string.Equals(snapshot.ProjectCodeMode, "Enabled", StringComparison.OrdinalIgnoreCase) ? ProjectActivities(snapshot) : Enumerable.Empty<DesignerToolboxItemInfo>()).OrderBy(item => item.Category, StringComparer.Ordinal).ThenBy(item => item.DisplayName, StringComparer.Ordinal)
@@ -71,7 +96,25 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		return types.Where(type => !type.IsAbstract && !type.ContainsGenericParameters && typeof(Activity).IsAssignableFrom(type) && type.GetConstructor(Type.EmptyTypes) != null);
 	}
 
-	static DesignerToolboxItemInfo ToolboxItem(Type type, string category) => new() { Name = type.Name, DisplayName = type.Name, TypeName = type.AssemblyQualifiedName ?? type.FullName ?? type.Name, Category = category };
+	static DesignerToolboxItemInfo ToolboxItem(Type type, string category)
+	{
+		// Activity authors should be able to make their toolbox entry useful without
+		// implementing an OpenDevelop-specific interface. These standard component-model
+		// attributes also work for activities shared with other WF hosts.
+		var displayName = type.GetCustomAttribute<System.ComponentModel.DisplayNameAttribute>()?.DisplayName;
+		var declaredCategory = type.GetCustomAttribute<System.ComponentModel.CategoryAttribute>()?.Category;
+		var description = type.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description;
+		return new DesignerToolboxItemInfo {
+			Name = type.Name,
+			DisplayName = string.IsNullOrWhiteSpace(displayName) ? HumanizeTypeName(type.Name) : displayName,
+			TypeName = type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+			Category = string.IsNullOrWhiteSpace(declaredCategory) ? category : declaredCategory,
+			Template = description ?? "",
+			XamlNamespace = type.Namespace ?? ""
+		};
+	}
+
+	static string HumanizeTypeName(string name) => System.Text.RegularExpressions.Regex.Replace(name, "(?<!^)([A-Z])", " $1");
 
 	DesignerSessionState Load(DesignerDocumentSnapshot snapshot)
 	{
@@ -127,11 +170,64 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var session = Get(documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
-		foreach (var id in elementIds)
-			if (!session.Document.Remove(id))
-				throw new InvalidOperationException("Workflow element deletion was rejected: " + id);
+		if (!session.Document.RemoveMany(elementIds))
+			throw new InvalidOperationException("Workflow element deletion was rejected.");
 		RecordMutation(session, before);
 		return State(session);
+	}
+
+	[JsonRpcMethod("design/copy-elements")]
+	public bool CopyElements(string sessionId, string documentId, string[] elementIds)
+	{
+		documents.ValidateSession(sessionId);
+		var document = Get(documentId).Document;
+		if (!document.Copy(elementIds)) return false;
+		clipboard = document.Clipboard.ToList();
+		return true;
+	}
+
+	[JsonRpcMethod("design/cut-elements")]
+	public DesignerSessionState CutElements(string sessionId, string documentId, long baseVersion, string[] elementIds)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		EnsureVersion(session, baseVersion);
+		if (!session.Document.Copy(elementIds)) throw new InvalidOperationException("The selected workflow item cannot be cut.");
+		var before = session.Document.ToXaml();
+		if (!session.Document.RemoveMany(elementIds)) throw new InvalidOperationException("Workflow cut was rejected.");
+		clipboard = session.Document.Clipboard.ToList();
+		RecordMutation(session, before);
+		return State(session);
+	}
+
+	[JsonRpcMethod("design/paste-elements")]
+	public DesignerSessionState PasteElements(string sessionId, string documentId, long baseVersion, string parentId)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		EnsureVersion(session, baseVersion);
+		var before = session.Document.ToXaml();
+		var pasted = session.Document.Paste(parentId, clipboard);
+		if (pasted == null || pasted.Count == 0) throw new InvalidOperationException("Workflow paste was rejected by the selected container.");
+		RecordMutation(session, before);
+		var state = State(session);
+		state.CreatedElementId = pasted[^1];
+		return state;
+	}
+
+	[JsonRpcMethod("workflow/move-element")]
+	public DesignerSessionState MoveElement(string sessionId, string documentId, long baseVersion, string elementId, int offset)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		EnsureVersion(session, baseVersion);
+		var before = session.Document.ToXaml();
+		var movedId = session.Document.MoveSibling(elementId, offset);
+		if (movedId == null) throw new InvalidOperationException("The selected activity cannot move in this container.");
+		RecordMutation(session, before);
+		var state = State(session);
+		state.CreatedElementId = movedId;
+		return state;
 	}
 
 	[JsonRpcMethod("design/undo")]
@@ -283,10 +379,63 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var text = expression.StartsWith("=", StringComparison.Ordinal) ? expression[(isVisualBasic ? 4 : 1)..] : expression;
 		if (string.IsNullOrWhiteSpace(text)) return new WorkflowExpressionValidation { Diagnostics = { "Expression cannot be empty." } };
 		var variables = session.Document.GetExpressionSymbolsVisibleAt(elementId).Where(variable => System.Text.RegularExpressions.Regex.IsMatch(variable.Name, "^[A-Za-z_][A-Za-z0-9_]*$")).GroupBy(variable => variable.Name, StringComparer.Ordinal).Select(group => group.First()).ToArray();
-		var source = isVisualBasic ? "Option Strict Off\nModule WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn (" + text + ")\nEnd Function\nEnd Module" : "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (" + text + "); } }";
+		var prefix = isVisualBasic ? "Option Strict Off\nModule WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn (" : "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (";
+		var suffix = isVisualBasic ? ")\nEnd Function\nEnd Module" : "); } }";
+		var source = prefix + text + suffix;
 		Compilation compilation = isVisualBasic ? VisualBasicCompilation.Create("WorkflowExpression", new[] { VisualBasicSyntaxTree.ParseText(source) }, MetadataReferences(session), new VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary)) : CSharpCompilation.Create("WorkflowExpression", new[] { CSharpSyntaxTree.ParseText(source) }, MetadataReferences(session), new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-		var diagnostics = compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).Select(diagnostic => diagnostic.GetMessage()).Distinct(StringComparer.Ordinal).ToList();
-		return new WorkflowExpressionValidation { IsValid = diagnostics.Count == 0, Diagnostics = diagnostics };
+		var errors = compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
+		var details = errors.Select(diagnostic => ToExpressionDiagnostic(diagnostic, prefix.Length, text)).Where(detail => detail != null).Cast<WorkflowExpressionDiagnostic>().ToList();
+		var diagnostics = errors.Select(diagnostic => diagnostic.GetMessage()).Distinct(StringComparer.Ordinal).ToList();
+		return new WorkflowExpressionValidation { IsValid = errors.Length == 0, Diagnostics = diagnostics, Details = details };
+	}
+
+	[JsonRpcMethod("workflow/validate")]
+	public WorkflowValidationResult ValidateWorkflow(string sessionId, string documentId, long baseVersion)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		EnsureVersion(session, baseVersion);
+		var rootActivity = session.Document.Root;
+		if (rootActivity == null) return new WorkflowValidationResult { Diagnostics = { new WorkflowValidationDiagnostic { Message = "No workflow implementation is loaded." } } };
+		try {
+			// Validate the visual root directly. The DynamicActivity wrapper used by Run is
+			// necessary for workflow arguments, but CoreWF reports inner violations against
+			// that synthetic wrapper instead of the design node that the user can select.
+			var paths = BuildRuntimeIds(rootActivity);
+			var results = ActivityValidationServices.Validate(rootActivity);
+			var diagnostics = results.Errors.Concat(results.Warnings).Select(error => new WorkflowValidationDiagnostic {
+				Message = error.Message,
+				ElementId = ValidationElementPath(error, paths),
+				PropertyName = error.PropertyName ?? "",
+				IsWarning = error.IsWarning
+			}).ToList();
+			return new WorkflowValidationResult { IsValid = results.Errors.Count == 0, Diagnostics = diagnostics };
+		} catch (Exception exception) {
+			return new WorkflowValidationResult { Diagnostics = { new WorkflowValidationDiagnostic { Message = exception.GetBaseException().Message } } };
+		}
+	}
+
+	static string ValidationElementPath(ValidationError error, IReadOnlyDictionary<string, string> paths)
+	{
+		foreach (var activity in new[] { error.Source, error.SourceDetail as Activity })
+			if (activity != null && !string.IsNullOrEmpty(activity.Id) && paths.TryGetValue(activity.Id, out var path)) return path;
+		return "";
+	}
+
+	static WorkflowExpressionDiagnostic? ToExpressionDiagnostic(Diagnostic diagnostic, int expressionStart, string expression)
+	{
+		if (!diagnostic.Location.IsInSource) return null;
+		var relativeStart = diagnostic.Location.SourceSpan.Start - expressionStart;
+		if (relativeStart < 0 || relativeStart > expression.Length) return null;
+		var before = expression[..relativeStart];
+		var lastNewLine = before.LastIndexOf('\n');
+		return new WorkflowExpressionDiagnostic {
+			Code = diagnostic.Id,
+			Message = diagnostic.GetMessage(),
+			Line = before.Count(character => character == '\n') + 1,
+			Column = relativeStart - lastNewLine,
+			Length = Math.Min(diagnostic.Location.SourceSpan.Length, expression.Length - relativeStart)
+		};
 	}
 
 	static string ExpressionVariableTypeName(DocumentSession session, string? typeName)
@@ -306,17 +455,72 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	{
 		documents.ValidateSession(sessionId);
 		var session = Get(documentId);
+		var roslyn = CompleteWithRoslyn(session, expression, prefix, elementId);
 		var visualBasic = expression.StartsWith("=vb:", StringComparison.OrdinalIgnoreCase);
 		var terms = visualBasic ? new[] { "True", "False", "Nothing", "If", "AndAlso", "OrElse", "Not", "String", "Math" } : new[] { "true", "false", "null", "this", "new", "nameof", "string", "Math" };
 		var owner = System.Text.RegularExpressions.Regex.Match(expression[..Math.Max(0, expression.Length - prefix.Length)], @"([A-Za-z_][A-Za-z0-9_.]*)\.$").Groups[1].Value;
-		if (ResolveCompletionType(owner, visualBasic) is { } staticType) return new WorkflowExpressionCompletion { Items = staticType.GetMembers(BindingFlags.Public | BindingFlags.Static).Where(member => member.MemberType is MemberTypes.Method or MemberTypes.Property or MemberTypes.Field).Select(member => member.Name).Where(name => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).Take(64).ToList() };
+		if (ResolveCompletionType(owner, visualBasic) is { } staticType) return new WorkflowExpressionCompletion { Items = staticType.GetMembers(BindingFlags.Public | BindingFlags.Static).Where(member => member.MemberType is MemberTypes.Method or MemberTypes.Property or MemberTypes.Field).Select(member => member.Name).Where(name => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Concat(roslyn.Items).Distinct(StringComparer.OrdinalIgnoreCase).Take(128).ToList() };
 		var variables = session.Document.GetExpressionSymbolsVisibleAt(elementId).ToArray();
 		var typeName = variables.FirstOrDefault(variable => string.Equals(variable.Name, owner, StringComparison.OrdinalIgnoreCase)).TypeName;
 		var instanceType = session.Document.GetVariableRuntimeTypeVisibleAt(owner, elementId) ?? ResolveVariableCompletionType(typeName);
-		if (instanceType != null) return new WorkflowExpressionCompletion { Items = instanceType.GetMembers(BindingFlags.Public | BindingFlags.Instance).Where(member => member.MemberType is MemberTypes.Method or MemberTypes.Property).Select(member => member.Name).Where(name => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).Take(64).ToList() };
-		var members = CompletionInstanceMembers(session, typeName, prefix); if (members.Count != 0) return new WorkflowExpressionCompletion { Items = members };
-		members = CompletionStaticMembers(session, owner, prefix); if (members.Count != 0) return new WorkflowExpressionCompletion { Items = members };
-		return new WorkflowExpressionCompletion { Items = terms.Concat(variables.Select(variable => variable.Name)).Concat(StandardActivities().Select(item => item.DisplayName)).Concat(CompletionTypeNames(session)).Where(item => item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).Take(64).ToList() };
+		if (instanceType != null) return new WorkflowExpressionCompletion { Items = CompleteRuntimeInstanceMembers(instanceType, prefix).Concat(roslyn.Items).Distinct(StringComparer.OrdinalIgnoreCase).Take(128).ToList() };
+		var members = CompletionInstanceMembers(session, typeName, prefix); if (members.Count != 0) return new WorkflowExpressionCompletion { Items = members.Concat(roslyn.Items).Distinct(StringComparer.OrdinalIgnoreCase).Take(128).ToList() };
+		members = CompletionStaticMembers(session, owner, prefix); if (members.Count != 0) return new WorkflowExpressionCompletion { Items = members.Concat(roslyn.Items).Distinct(StringComparer.OrdinalIgnoreCase).Take(128).ToList() };
+		return new WorkflowExpressionCompletion { Items = terms.Concat(variables.Select(variable => variable.Name)).Concat(StandardActivities().Select(item => item.DisplayName)).Concat(roslyn.Items).Concat(CompletionTypeNames(session)).Where(item => item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).Take(128).ToList() };
+	}
+
+	static WorkflowExpressionCompletion CompleteWithRoslyn(DocumentSession session, string expression, string prefix, string? elementId)
+	{
+		try {
+			var visualBasic = expression.StartsWith("=vb:", StringComparison.OrdinalIgnoreCase);
+			var text = expression.StartsWith("=", StringComparison.Ordinal) ? expression[(visualBasic ? 4 : 1)..] : expression;
+			var variables = session.Document.GetExpressionSymbolsVisibleAt(elementId)
+				.Where(variable => System.Text.RegularExpressions.Regex.IsMatch(variable.Name, "^[A-Za-z_][A-Za-z0-9_]*$"))
+				.GroupBy(variable => variable.Name, StringComparer.Ordinal).Select(group => group.First()).ToArray();
+			var before = visualBasic
+				? "Option Strict Off\nModule WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn ("
+				: "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (";
+			var after = visualBasic ? ")\nEnd Function\nEnd Module" : "); } }";
+			using var workspace = new AdhocWorkspace(MefHostServices.DefaultHost);
+			var projectId = ProjectId.CreateNewId();
+			var documentId = DocumentId.CreateNewId(projectId);
+			var solution = workspace.CurrentSolution.AddProject(ProjectInfo.Create(projectId, VersionStamp.Create(), "WorkflowExpression", "WorkflowExpression", visualBasic ? LanguageNames.VisualBasic : LanguageNames.CSharp,
+				metadataReferences: MetadataReferences(session).ToArray()))
+				.AddDocument(documentId, "WorkflowExpression." + (visualBasic ? "vb" : "cs"), before + text + after);
+			if (!workspace.TryApplyChanges(solution)) return new WorkflowExpressionCompletion();
+			var document = workspace.CurrentSolution.GetDocument(documentId);
+			if (document == null) return new WorkflowExpressionCompletion();
+			var completion = CompletionService.GetService(document);
+			if (completion == null) return new WorkflowExpressionCompletion();
+			var result = completion.GetCompletionsAsync(document, before.Length + text.Length).GetAwaiter().GetResult();
+			if (result == null) return new WorkflowExpressionCompletion();
+			return new WorkflowExpressionCompletion { Items = result.ItemsList.Select(item => item.DisplayText)
+				.Where(item => string.IsNullOrEmpty(prefix) || item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+				.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).Take(128).ToList() };
+		} catch {
+			// Roslyn features are intentionally optional at runtime: fall back to the lightweight,
+			// metadata-only completion path if a deployment is missing a feature assembly.
+			return new WorkflowExpressionCompletion();
+		}
+	}
+
+	static List<string> CompleteRuntimeInstanceMembers(Type type, string prefix)
+	{
+		var members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance)
+			.Where(member => member.MemberType is MemberTypes.Method or MemberTypes.Property)
+			.Select(member => member.Name);
+
+		// Workflow expressions commonly operate on collection variables.  Extension
+		// methods are not reflected as instance members, but they are valid C# calls
+		// and therefore must appear in the designer completion list.
+		if (typeof(System.Collections.IEnumerable).IsAssignableFrom(type)) {
+			members = members.Concat(typeof(Enumerable).GetMethods(BindingFlags.Public | BindingFlags.Static)
+				.Where(method => method.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), inherit: false))
+				.Select(method => method.Name));
+		}
+
+		return members.Where(name => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+			.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).Take(64).ToList();
 	}
 
 	static List<string> CompletionInstanceMembers(DocumentSession session, string? typeName, string prefix)
@@ -401,8 +605,15 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		}
 	}
 
+	// Keep the service implementation synchronous for direct host tests, but never execute it on
+	// StreamJsonRpc's dispatch path. A breakpoint deliberately waits for a later Continue/Step
+	// request on the very same connection; a synchronous RPC handler would starve that request and
+	// turn every real designer breakpoint into a 30-second timeout.
 	[JsonRpcMethod("workflow/run")]
-	public WorkflowRunResult Run(string sessionId, string documentId, long baseVersion)
+	public Task<WorkflowRunResult> RunRpc(string sessionId, string documentId, long baseVersion, Dictionary<string, string>? inputs = null)
+		=> Task.Run(() => Run(sessionId, documentId, baseVersion, inputs));
+
+	public WorkflowRunResult Run(string sessionId, string documentId, long baseVersion, Dictionary<string, string>? inputs = null)
 	{
 		documents.ValidateSession(sessionId);
 		var session = Get(documentId);
@@ -414,12 +625,16 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var waitingStateMachines = StateMachinesWaitingForExternalEvent(session.Document.Root);
 		if (waitingStateMachines.Count != 0)
 			return new WorkflowRunResult { Message = "StateMachine " + string.Join(", ", waitingStateMachines) + " starts with transitions that have no Trigger. This designer run has no external state-machine event source; add a Trigger such as Delay before running." };
+		if (!session.Document.TryCreateRunInputs(inputs, out var runInputs, out var inputError)) return new WorkflowRunResult { Message = inputError };
 		try {
-			var application = new WorkflowApplication(session.Document.Root);
+			var runtimeActivity = session.Document.CreateRuntimeActivity();
+			if (runtimeActivity == null) return new WorkflowRunResult { Message = "No workflow implementation is loaded." };
+			var application = new WorkflowApplication(runtimeActivity, runInputs);
 			WorkflowDebugRun debug;
 			lock (session.RunGate) {
 				if (session.RunningApplication != null) return new WorkflowRunResult { Message = "A workflow run is already active." };
-				debug = new WorkflowDebugRun(BuildRuntimeIds(session), session.Breakpoints);
+				debug = new WorkflowDebugRun(BuildRuntimeIds(runtimeActivity), session.Breakpoints,
+					runInputs.ToDictionary(input => input.Key, input => input.Value?.ToString() ?? ""));
 				session.WasCancelled = false;
 				session.RunningApplication = application;
 				session.DebugRun = debug;
@@ -432,8 +647,13 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 			application.Completed += args => { outputs = args.Outputs; completed.Set(); };
 			application.Aborted += args => { failure = args.Reason; completed.Set(); };
 			application.OnUnhandledException = args => { failure = args.UnhandledException; completed.Set(); return UnhandledExceptionAction.Abort; };
+			application.Idle += args => debug.SetBookmarks(args.Bookmarks.Select(bookmark => new WorkflowBookmarkInfo { Name = bookmark.BookmarkName, OwnerDisplayName = bookmark.OwnerDisplayName }));
 			application.Run();
-			if (!completed.Wait(TimeSpan.FromSeconds(30))) { application.Abort("Workflow Designer run timed out."); return new WorkflowRunResult { Message = "Workflow timed out after 30 seconds.", Trace = trace.Records }; }
+			// A workflow that has reached Idle with external bookmarks is not hung: it is waiting
+			// for its host. Do not impose the old fixed 30-second wall here, or a perfectly valid
+			// event-driven activity becomes impossible to debug. Stop/Cancel or Resume Bookmark
+			// remain explicit user-controlled ways to finish that wait.
+			completed.Wait();
 			if (failure != null) return new WorkflowRunResult { Message = session.WasCancelled ? "Workflow cancelled." : failure.GetBaseException().Message, Trace = trace.Records };
 			return new WorkflowRunResult {
 				Succeeded = true,
@@ -471,17 +691,25 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		pending.Push(root);
 		while (pending.Count > 0) {
 			var activity = pending.Pop();
-			if (activity is ITextExpression { RequiresCompilation: true } expression)
+			// CoreWF's current ITextExpression contract does not expose the legacy
+			// RequiresCompilation flag. Every text expression in a dynamically-loaded
+			// workflow still needs generated-expression compilation before execution,
+			// so detect the interface itself rather than binding to the removed member.
+			if (activity is ITextExpression expression)
 				languages.Add(string.Equals(expression.Language, "VB", StringComparison.OrdinalIgnoreCase) || expression.Language.Contains("VisualBasic", StringComparison.OrdinalIgnoreCase) ? "VB" : expression.Language);
 			foreach (var child in InspectChildren(activity)) pending.Push(child);
 		}
 		return languages.OrderBy(language => language, StringComparer.Ordinal).ToList();
 	}
 
-	static Dictionary<string, string> BuildRuntimeIds(DocumentSession session)
+	static Dictionary<string, string> BuildRuntimeIds(Activity runtimeRoot)
 	{
 		var result = new Dictionary<string, string>(StringComparer.Ordinal);
-		if (session.Document.Root != null) AddRuntimeIds(session.Document.Root, "", result);
+		// The executable root is a DynamicActivity wrapper so declared workflow arguments
+		// are available. Its implementation remains the visual root and must therefore
+		// retain path "" rather than becoming a synthetic "0" node for breakpoints.
+		var visualRoot = runtimeRoot is DynamicActivity ? InspectChildren(runtimeRoot).FirstOrDefault() : runtimeRoot;
+		if (visualRoot != null) AddRuntimeIds(visualRoot, "", result);
 		return result;
 	}
 
@@ -582,6 +810,18 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		lock (session.RunGate) return session.DebugRun?.Resume(WorkflowDebugRun.StepMode.None) == true;
 	}
 
+	[JsonRpcMethod("workflow/resume-bookmark")]
+	public bool ResumeBookmark(string sessionId, string documentId, string bookmarkName, string? value = null)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		lock (session.RunGate) {
+			if (session.RunningApplication == null || string.IsNullOrWhiteSpace(bookmarkName)) return false;
+			session.DebugRun?.ClearBookmarks();
+			return session.RunningApplication.ResumeBookmark(bookmarkName, value) == BookmarkResumptionResult.Success;
+		}
+	}
+
 	[JsonRpcMethod("workflow/step")]
 	public bool StepRun(string sessionId, string documentId)
 	{
@@ -630,6 +870,18 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		return State(session);
 	}
 
+	[JsonRpcMethod("workflow/set-flow-start")]
+	public DesignerSessionState SetFlowStart(string sessionId, string documentId, long baseVersion, string elementId)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(documentId);
+		EnsureVersion(session, baseVersion);
+		var before = session.Document.ToXaml();
+		if (!session.Document.SetFlowStart(elementId)) throw new InvalidOperationException("Select a Flowchart step or Flow Decision to set the start node.");
+		RecordMutation(session, before);
+		return State(session);
+	}
+
 	[JsonRpcMethod("workflow/disconnect-flow")]
 	public DesignerSessionState DisconnectFlow(string sessionId, string documentId, long baseVersion, string sourceId, string branch)
 	{
@@ -642,12 +894,44 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		return State(session);
 	}
 
-	static WorkflowDebugState DebugState(DocumentSession session) => new() {
-		IsRunning = session.RunningApplication != null,
-		IsPaused = session.DebugRun?.IsPaused == true,
-		CurrentElementId = session.DebugRun?.CurrentElementId ?? "",
-		BreakpointElementIds = session.Breakpoints.OrderBy(id => id, StringComparer.Ordinal).ToList()
-	};
+	static WorkflowDebugState DebugState(DocumentSession session)
+	{
+		var debugRun = session.DebugRun;
+		var debug = debugRun?.Snapshot();
+		var currentElementId = debug?.CurrentElementId ?? "";
+		return new WorkflowDebugState {
+			IsRunning = session.RunningApplication != null,
+			IsPaused = debug?.IsPaused == true,
+			IsIdle = debug?.IsIdle == true,
+			CurrentElementId = currentElementId,
+			BreakpointElementIds = session.Breakpoints.OrderBy(id => id, StringComparer.Ordinal).ToList(),
+			Inputs = debugRun?.Inputs ?? new Dictionary<string, string>(),
+			Bookmarks = debugRun?.Bookmarks ?? new List<WorkflowBookmarkInfo>(),
+			Trace = debug?.Trace ?? new List<string>(),
+			CallStack = debug?.IsPaused == true ? DebugStack(session.Document, currentElementId) : new List<WorkflowDebugFrame>()
+		};
+	}
+
+	static List<WorkflowDebugFrame> DebugStack(WorkflowDocument document, string elementId)
+	{
+		var result = new List<WorkflowDebugFrame>();
+		var ids = new List<string> { "" };
+		if (!string.IsNullOrEmpty(elementId)) {
+			var current = "";
+			foreach (var part in elementId.Split('.', StringSplitOptions.RemoveEmptyEntries)) {
+				current = current.Length == 0 ? part : current + "." + part;
+				ids.Add(current);
+			}
+		}
+		foreach (var id in ids) {
+			var activity = document.Find(id);
+			var marker = id.Split('.', StringSplitOptions.RemoveEmptyEntries).LastOrDefault(part => part.StartsWith('$'));
+			var typeName = activity?.GetType().Name ?? (marker?.StartsWith("$case-", StringComparison.Ordinal) == true ? "Switch case" : marker?.StartsWith("$state-", StringComparison.Ordinal) == true ? "State" : marker?.StartsWith("$transition-", StringComparison.Ordinal) == true ? "Transition" : "Workflow scope");
+			var displayName = activity?.DisplayName;
+			result.Add(new WorkflowDebugFrame { ElementId = id, TypeName = typeName, DisplayName = string.IsNullOrWhiteSpace(displayName) ? (id.Length == 0 ? "Workflow" : typeName) : displayName });
+		}
+		return result;
+	}
 
 	sealed class WorkflowTraceParticipant : TrackingParticipant
 	{
@@ -665,7 +949,9 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		protected override void Track(TrackingRecord record, TimeSpan timeout)
 		{
 			if (record is ActivityStateRecord state) {
-				Records.Add(state.Activity.Name + ": " + state.State);
+				var entry = state.Activity.Name + ": " + state.State;
+				Records.Add(entry);
+				debug.Record(entry);
 				if (string.Equals(state.State, "Executing", StringComparison.Ordinal)) debug.Observe(state.Activity.Id);
 			}
 		}
@@ -678,19 +964,42 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	{
 		readonly Dictionary<string, string> activityIds;
 		readonly HashSet<string> breakpoints;
+		readonly Dictionary<string, string> inputs;
+		readonly List<WorkflowBookmarkInfo> bookmarks = new();
 		readonly ManualResetEventSlim resume = new(false);
 		readonly object gate = new();
 		StepMode stepMode;
 		string stepOrigin = "";
 		bool cancelled;
+		readonly List<string> trace = new();
 		public bool IsPaused { get; private set; }
+		public bool IsIdle { get; private set; }
 		public string CurrentElementId { get; private set; } = "";
+		public Dictionary<string, string> Inputs { get { lock (gate) return new Dictionary<string, string>(inputs); } }
+		public List<WorkflowBookmarkInfo> Bookmarks { get { lock (gate) return bookmarks.Select(bookmark => new WorkflowBookmarkInfo { Name = bookmark.Name, OwnerDisplayName = bookmark.OwnerDisplayName }).ToList(); } }
+		public (bool IsPaused, bool IsIdle, string CurrentElementId, List<string> Trace) Snapshot()
+		{
+			lock (gate) return (IsPaused, IsIdle, CurrentElementId, trace.ToList());
+		}
+		public void Record(string entry)
+		{
+			lock (gate) trace.Add(entry);
+		}
+		public void SetBookmarks(IEnumerable<WorkflowBookmarkInfo> values)
+		{
+			lock (gate) { bookmarks.Clear(); bookmarks.AddRange(values); IsIdle = bookmarks.Count != 0; }
+		}
+		public void ClearBookmarks()
+		{
+			lock (gate) { bookmarks.Clear(); IsIdle = false; }
+		}
 		public enum StepMode { None, Next, Over, Out }
 
-		public WorkflowDebugRun(Dictionary<string, string> activityIds, IEnumerable<string> breakpoints)
+		public WorkflowDebugRun(Dictionary<string, string> activityIds, IEnumerable<string> breakpoints, Dictionary<string, string> inputs)
 		{
 			this.activityIds = activityIds;
 			this.breakpoints = new HashSet<string>(breakpoints, StringComparer.Ordinal);
+			this.inputs = inputs;
 		}
 
 		public void Observe(string runtimeActivityId)
@@ -763,7 +1072,8 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 			children = children.Where(child => !ReferenceEquals(parallelForEachForChildren.Body?.Handler, child) && !ReferenceEquals(parallelForEachForChildren.Values?.Expression, child)).ToArray();
 		if (activity is StateMachine) children = Array.Empty<Activity>();
 		var properties = document.GetProperties(activity)
-			.Select(p => new DesignerPropertyInfo { Name = p.Name, DisplayName = p.Name, Value = p.Value, TypeName = p.TypeName, IsReadOnly = p.IsReadOnly, Category = "Workflow" })
+			.Where(p => IsBrowsableProperty(activity, p.Name))
+			.Select(p => ToPropertyInfo(activity, p.Name, p.Value, p.TypeName, p.IsReadOnly))
 			.Prepend(new DesignerPropertyInfo { Name = "$displayName", DisplayName = "DisplayName", Value = activity.DisplayName, Category = "Identity" })
 			.ToList();
 		var childNodes = children.Select((child, index) => Node(document, child, path.Length == 0 ? index.ToString() : path + "." + index)).ToList();
@@ -886,6 +1196,31 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 			Children = childNodes
 		};
 	}
+
+	static DesignerPropertyInfo ToPropertyInfo(Activity activity, string name, string value, string typeName, bool isReadOnly)
+	{
+		// Several CoreWF generic activities hide a base Result property. GetProperty(name)
+		// throws AmbiguousMatchException for them, so select the same public instance surface
+		// the document projection uses instead of asking reflection for a unique match.
+		var property = FindDesignProperty(activity, name);
+		var type = property?.PropertyType;
+		var isEnum = type?.IsEnum == true;
+		return new DesignerPropertyInfo {
+			Name = name,
+			DisplayName = property?.GetCustomAttribute<System.ComponentModel.DisplayNameAttribute>()?.DisplayName ?? name,
+			Description = property?.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description ?? "",
+			Value = value, TypeName = typeName,
+			IsReadOnly = isReadOnly || property?.GetCustomAttribute<System.ComponentModel.ReadOnlyAttribute>()?.IsReadOnly == true,
+			Category = property?.GetCustomAttribute<System.ComponentModel.CategoryAttribute>()?.Category ?? "Workflow",
+			Kind = isEnum ? "Enum" : "String",
+			AllowedValues = isEnum ? Enum.GetNames(type!).ToList() : new List<string>()
+		};
+	}
+
+	static bool IsBrowsableProperty(Activity activity, string name) => FindDesignProperty(activity, name)?.GetCustomAttribute<System.ComponentModel.BrowsableAttribute>()?.Browsable != false;
+
+	static PropertyInfo? FindDesignProperty(Activity activity, string name) => activity.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+		.FirstOrDefault(property => string.Equals(property.Name, name, StringComparison.Ordinal));
 
 	static Activity[] InspectChildren(Activity activity)
 	{

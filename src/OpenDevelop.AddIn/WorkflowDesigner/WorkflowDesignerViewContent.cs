@@ -6,10 +6,12 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using Line = System.Windows.Shapes.Line;
+using Polygon = System.Windows.Shapes.Polygon;
 
 using ICSharpCode.SharpDevelop;
 using ICSharpCode.SharpDevelop.Designer.Remote;
@@ -36,7 +38,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	readonly StackPanel surface = new() { Margin = new Thickness(24) };
 	readonly DesignerCanvas canvas = new();
 	readonly DocumentOutlineControl outline = new();
-	readonly ListBox toolbox = new() { DisplayMemberPath = nameof(DesignerToolboxItemInfo.DisplayName) };
+	readonly ListBox toolbox = new();
 	readonly TextBox toolboxFilter = new() { Margin = new Thickness(4), ToolTip = "Filter activities" };
 	readonly TextBlock toolboxSummary = new() { Margin = new Thickness(4, 2, 4, 0), Foreground = Brushes.DimGray };
 	readonly DockPanel toolboxPane = new();
@@ -49,11 +51,18 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	readonly DesignerCommandController commands = new();
 	readonly Dictionary<string, Border> boxesById = new();
 	readonly StackPanel breadcrumbs = new() { Orientation = Orientation.Horizontal, Margin = new Thickness(8, 4, 8, 4) };
+	// The command buttons live on a real toolbar built ONCE (BuildToolBar), above the breadcrumb
+	// trail. They used to be appended to `breadcrumbs` inside BuildBreadcrumbs, which rebuilt ~26
+	// buttons on every Rebuild() and mixed fixed commands into what should only be the drill path.
+	readonly ToolBarTray toolBarTray = new() { IsLocked = true };
+	readonly ToolBar toolBar = new();
 	readonly Canvas overview = new() { Width = 150, Height = 72, Background = Brushes.Gainsboro, Margin = new Thickness(8, 2, 8, 2) };
 	readonly Border overviewViewport = new() { BorderBrush = Brushes.DodgerBlue, BorderThickness = new Thickness(1), IsHitTestVisible = false };
 	readonly HashSet<string> collapsed = new();
 	readonly HashSet<string> breakpoints = new();
 	readonly Dictionary<string, WorkflowNodePosition> flowNodePositions = new(StringComparer.Ordinal);
+	readonly Dictionary<string, bool> validationMarkers = new(StringComparer.Ordinal);
+	readonly System.Windows.Threading.DispatcherTimer validationTimer = new() { Interval = TimeSpan.FromMilliseconds(450) };
 
 	WorkflowDesignerHostClient? host;
 	DesignerSessionState state = new();
@@ -64,6 +73,9 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	bool awaitingWorkflowShortcut;
 	string? pendingFlowSourceId;
 	bool? pendingFlowDecisionBranch;
+	string? pendingStateTransitionId;
+	Task<WorkflowRunResult>? runningWorkflow;
+	readonly EventHandler<BuildEventArgs> buildFinishedHandler;
 
 	string LayoutFileName => xamlFile.FileName + ".workflowdesigner.layout.json";
 	sealed class WorkflowNodePosition { public double X { get; set; } public double Y { get; set; } }
@@ -71,9 +83,21 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		public Dictionary<string, WorkflowNodePosition> Nodes { get; set; } = new(StringComparer.Ordinal);
 		public List<string> BreakpointElementIds { get; set; } = new();
 	}
+	sealed class WorkflowValidationListItem {
+		public WorkflowValidationDiagnostic Diagnostic { get; init; } = new();
+		public string Severity => Diagnostic.IsWarning ? "Warning" : "Error";
+		public string Location => string.IsNullOrWhiteSpace(Diagnostic.ElementId) ? "Workflow" : Diagnostic.ElementId + (string.IsNullOrWhiteSpace(Diagnostic.PropertyName) ? "" : "." + Diagnostic.PropertyName);
+		public string Text => Severity + " · " + Location + " · " + Diagnostic.Message;
+	}
+	sealed class WorkflowSearchItem {
+		public DesignerElementNode Node { get; init; } = new();
+		public string Text => Node.Type + " · " + (string.IsNullOrWhiteSpace(Node.Name) ? "(unnamed)" : Node.Name) + " · " + (string.IsNullOrEmpty(Node.Id) ? "Workflow" : Node.Id);
+	}
 
 	public WorkflowDesignerViewContent(OpenedFile file) : base(file)
 	{
+		validationTimer.Tick += async (_, _) => { validationTimer.Stop(); await RefreshWorkflowValidationAsync(); };
+		toolbox.ItemTemplate = CreateToolboxItemTemplate();
 		toolboxModel.SetItems(ToolNames.Select(name => new DesignerToolboxItemInfo { Name = name, DisplayName = name, TypeName = name, Category = "Workflow" }));
 		toolbox.ItemsSource = toolboxModel.VisibleItems;
 		toolboxModel.ItemsChanged += (_, _) => RefreshToolboxView();
@@ -98,21 +122,31 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		outline.SelectionCommitted += (_, _) => pads.CommitOutlineSelection(outline.SelectedNode?.Id);
 
 		xamlFile = file;
+		buildFinishedHandler = BuildFinished;
+		SD.BuildService.BuildFinished += buildFinishedHandler;
 		TabPageText = "Design";
 		ConfigureCanvas();
 		var grid = new Grid();
-		grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-		grid.RowDefinitions.Add(new RowDefinition());
-		grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+		grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // toolbar
+		grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // breadcrumb trail
+		grid.RowDefinitions.Add(new RowDefinition());                              // canvas
+		grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // diagnostics
+		BuildToolBar();
+		toolBarTray.ToolBars.Add(toolBar);
+		grid.Children.Add(toolBarTray);
 		grid.Children.Add(breadcrumbs);
+		Grid.SetRow(breadcrumbs, 1);
 		breadcrumbs.Children.Add(overview);
 		grid.Children.Add(canvas);
-		Grid.SetRow(canvas, 1);
-		Grid.SetRow(diagnostic, 2);
+		Grid.SetRow(canvas, 2);
+		Grid.SetRow(diagnostic, 3);
 		grid.Children.Add(diagnostic);
 		grid.CommandBindings.Add(new CommandBinding(ApplicationCommands.Delete, (_, _) => DeleteSelected()));
 		grid.CommandBindings.Add(new CommandBinding(ApplicationCommands.Undo, (_, _) => commands.Execute(DesignerCommandNames.Undo)));
 		grid.CommandBindings.Add(new CommandBinding(ApplicationCommands.Redo, (_, _) => commands.Execute(DesignerCommandNames.Redo)));
+		grid.CommandBindings.Add(new CommandBinding(ApplicationCommands.Cut, (_, _) => CutSelected()));
+		grid.CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy, (_, _) => CopySelected()));
+		grid.CommandBindings.Add(new CommandBinding(ApplicationCommands.Paste, (_, _) => PasteIntoSelected()));
 		grid.PreviewKeyDown += (_, e) => {
 			if (awaitingWorkflowShortcut) {
 				awaitingWorkflowShortcut = false;
@@ -131,11 +165,30 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 				e.Handled = true;
 				return;
 			}
+			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.A && e.OriginalSource is not TextBox) { SelectAllActivities(); e.Handled = true; return; }
+			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.D && e.OriginalSource is not TextBox) { DuplicateSelected(); e.Handled = true; return; }
+			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.F) { ShowWorkflowSearch(); e.Handled = true; return; }
 			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.T) { toolboxFilter.Focus(); toolboxFilter.SelectAll(); e.Handled = true; return; }
 			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.E) { awaitingWorkflowShortcut = true; e.Handled = true; }
 			if (e.Key == Key.Escape && pendingFlowSourceId != null) { CancelFlowConnection(); e.Handled = true; }
+			else if (e.Key == Key.Escape && pendingStateTransitionId != null) { CancelStateTransitionConnection(); e.Handled = true; }
 		};
 		UserContent = grid;
+	}
+
+	static DataTemplate CreateToolboxItemTemplate()
+	{
+		var panel = new FrameworkElementFactory(typeof(StackPanel));
+		var name = new FrameworkElementFactory(typeof(TextBlock));
+		name.SetBinding(TextBlock.TextProperty, new Binding(nameof(DesignerToolboxItemInfo.DisplayName)));
+		name.SetBinding(TextBlock.ToolTipProperty, new Binding(nameof(DesignerToolboxItemInfo.Template)));
+		panel.AppendChild(name);
+		var category = new FrameworkElementFactory(typeof(TextBlock));
+		category.SetBinding(TextBlock.TextProperty, new Binding(nameof(DesignerToolboxItemInfo.Category)));
+		category.SetValue(TextBlock.FontSizeProperty, 10d);
+		category.SetValue(TextBlock.ForegroundProperty, Brushes.DimGray);
+		panel.AppendChild(category);
+		return new DataTemplate(typeof(DesignerToolboxItemInfo)) { VisualTree = panel };
 	}
 
 	/// <summary>Wires up the shared zoom/fit toolbar every other designer backend uses
@@ -194,6 +247,80 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	public int ToolboxItemCount => toolboxModel.AllItems.Count;
 	public int ProjectToolboxItemCount => toolboxModel.AllItems.Count(item => item.Category == "Project");
 	public int ReferencedToolboxItemCount => toolboxModel.AllItems.Count(item => item.Category == "Referenced activity");
+	public string? SelectedElementId => selected?.Id;
+	public string? SelectedElementType => selected?.Type;
+	public bool CanUndo => state.CanUndo && host?.IsAlive == true;
+	public bool CanRedo => state.CanRedo && host?.IsAlive == true;
+
+	/// <summary>Test and automation entry point that follows the same selection path as an
+	/// outline/surface click. It deliberately works with structural IDs, which are stable across
+	/// the OOP protocol and do not require display names to be unique.</summary>
+	public bool SelectElement(string id)
+	{
+		if (state.Tree == null) return false;
+		var node = Find(state.Tree, id);
+		if (node == null) return false;
+		selection.Select(node);
+		return true;
+	}
+
+	public void FilterToolbox(string text) => toolboxModel.Filter(text ?? "");
+
+	/// <summary>Runs model validation without opening the interactive diagnostics dialog. The
+	/// returned result is also applied to the design surface, exactly as the Validate toolbar
+	/// command does.</summary>
+	public WorkflowValidationResult ValidateModel()
+	{
+		if (host == null) return new WorkflowValidationResult { IsValid = false, Diagnostics = { new WorkflowValidationDiagnostic { Message = "Workflow designer host is unavailable." } } };
+		var result = host.ValidateWorkflowAsync(state.Version).GetAwaiter().GetResult();
+		ApplyWorkflowValidation(result);
+		return result;
+	}
+
+	public bool UndoLastEdit() => Undo();
+	public bool RedoLastEdit() => Redo();
+
+	/// <summary>Executes the current document through the same isolated CoreWF host used by the
+	/// Run command, without displaying the interactive argument dialog. Automation callers pass
+	/// only literal input values; normal UI callers continue through <see cref="RunWorkflow"/>.</summary>
+	public WorkflowRunResult RunModel(IReadOnlyDictionary<string, string>? inputs = null)
+	{
+		if (host == null) return new WorkflowRunResult { Message = "Workflow designer host is unavailable." };
+		return host.RunAsync(state.Version, inputs).GetAwaiter().GetResult();
+	}
+
+	/// <summary>Starts a run without blocking the UI, so a debugger client can observe a
+	/// breakpoint and issue Continue/Step over the same OOP connection.</summary>
+	public bool BeginRunModel(IReadOnlyDictionary<string, string>? inputs = null)
+	{
+		if (host == null || (runningWorkflow != null && !runningWorkflow.IsCompleted)) return false;
+		runningWorkflow = host.RunAsync(state.Version, inputs);
+		return true;
+	}
+
+	public WorkflowDebugState GetDebugModel()
+	{
+		if (host == null) return new WorkflowDebugState();
+		var debug = host.GetDebugStateAsync().GetAwaiter().GetResult();
+		ApplyDebugState(debug);
+		return debug;
+	}
+
+	public bool ToggleSelectedBreakpointModel()
+	{
+		if (host == null || selected == null) return false;
+		ApplyDebugState(host.ToggleBreakpointAsync(selected.Id).GetAwaiter().GetResult());
+		SaveLayout();
+		return true;
+	}
+
+	public bool ContinueRunModel() => host?.ContinueRunAsync().GetAwaiter().GetResult() == true;
+	public bool ResumeBookmarkModel(string bookmarkName, string? value = null) => host?.ResumeBookmarkAsync(bookmarkName, value).GetAwaiter().GetResult() == true;
+	public bool StepRunModel() => host?.StepRunAsync().GetAwaiter().GetResult() == true;
+	public bool StepOverRunModel() => host?.StepOverRunAsync().GetAwaiter().GetResult() == true;
+	public bool StepOutRunModel() => host?.StepOutRunAsync().GetAwaiter().GetResult() == true;
+	public bool IsRunModelCompleted => runningWorkflow?.IsCompleted == true;
+	public WorkflowRunResult? CompletedRunModel => runningWorkflow is { IsCompletedSuccessfully: true } ? runningWorkflow.Result : null;
 
 	public bool Add(string type, string? targetParentId = null)
 	{
@@ -206,7 +333,14 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			diagnostic.Text = $"Cannot insert {type}: {exception.Message}";
 			return false;
 		}
-		var added = state.Tree == null ? null : Flatten(state.Tree).FirstOrDefault(n => !before.Contains(n.Id));
+		// The host is authoritative about the inserted structural ID. Collection edits can
+		// reindex siblings during XAML round-tripping, so inferring the new node purely from
+		// a before/after ID set can report a successful insertion as a failure.
+		var added = state.Tree == null ? null : !string.IsNullOrWhiteSpace(state.CreatedElementId) ? Find(state.Tree, state.CreatedElementId) : null;
+		// A collection may be normalized by a workflow activity while rebuilding its child
+		// list. In that rare case the response path is stale by the time the visual tree is
+		// projected, so retain the before/after fallback rather than losing a successful drop.
+		added ??= state.Tree == null ? null : Flatten(state.Tree).FirstOrDefault(n => !before.Contains(n.Id));
 		if (added != null) selection.Select(added);
 		else diagnostic.Text = $"Cannot insert {type}: the selected activity does not accept another child.";
 		return added != null;
@@ -233,6 +367,74 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		return true;
 	}
 
+	bool CopySelected()
+	{
+		if (selection.SelectedIds.Count == 0 || host == null) return false;
+		var copied = host.CopyElementsAsync(selection.SelectedIds.ToArray()).GetAwaiter().GetResult();
+		diagnostic.Text = copied ? $"Copied {selection.SelectedIds.Count} workflow item(s)." : "The selected item cannot be copied.";
+		return copied;
+	}
+
+	bool CutSelected()
+	{
+		if (selection.SelectedIds.Count == 0 || host == null) return false;
+		try {
+			Mutate(() => host.CutElementsAsync(state.Version, selection.SelectedIds.ToArray()).GetAwaiter().GetResult());
+			return true;
+		} catch (Exception exception) {
+			diagnostic.Text = "Cannot cut the selected workflow item: " + exception.Message;
+			return false;
+		}
+	}
+
+	bool PasteIntoSelected()
+	{
+		if (selected == null || host == null) return false;
+		try {
+			Mutate(() => host.PasteElementsAsync(state.Version, selected.Id).GetAwaiter().GetResult());
+			if (state.CreatedElementId is { } id && selection.Find(id) is { } pasted) selection.Select(pasted);
+			return true;
+		} catch (Exception exception) {
+			diagnostic.Text = "Cannot paste into the selected activity: " + exception.Message;
+			return false;
+		}
+	}
+
+	void SelectAllActivities()
+	{
+		if (state.Tree == null) return;
+		selection.Select(Flatten(state.Tree), DesignerSelectionOperation.Replace);
+	}
+
+	bool DuplicateSelected()
+	{
+		if (selected == null || host == null || string.IsNullOrEmpty(selected.Id)) return false;
+		var separator = selected.Id.LastIndexOf('.');
+		var parentId = separator < 0 ? "" : selected.Id[..separator];
+		try {
+			if (!host.CopyElementsAsync(new[] { selected.Id }).GetAwaiter().GetResult()) return false;
+			Mutate(() => host.PasteElementsAsync(state.Version, parentId).GetAwaiter().GetResult());
+			if (state.CreatedElementId is { } id && selection.Find(id) is { } duplicate) selection.Select(duplicate);
+			return true;
+		} catch (Exception exception) {
+			diagnostic.Text = "Cannot duplicate the selected activity: " + exception.Message;
+			return false;
+		}
+	}
+
+	bool MoveSelected(int offset)
+	{
+		if (selected == null || host == null) return false;
+		try {
+			Mutate(() => host.MoveElementAsync(state.Version, selected.Id, offset).GetAwaiter().GetResult());
+			if (state.CreatedElementId is { } id && selection.Find(id) is { } moved) selection.Select(moved);
+			return true;
+		} catch (Exception exception) {
+			diagnostic.Text = "Cannot move the selected activity: " + exception.Message;
+			return false;
+		}
+	}
+
 	bool Undo()
 	{
 		if (host == null) return false;
@@ -251,8 +453,11 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	{
 		state = action();
 		xamlFile.MakeDirty();
+		validationMarkers.Clear();
 		Rebuild();
 		commands.Invalidate();
+		validationTimer.Stop();
+		validationTimer.Start();
 	}
 
 	void Rebuild()
@@ -267,6 +472,22 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			BuildBreadcrumbs(state.Tree, root);
 			BuildOverview(state.Tree, root.Id);
 			surface.Children.Add(Box(root));
+		}
+	}
+
+	void BuildFinished(object sender, BuildEventArgs args)
+	{
+		if (args.Results?.Result != BuildResultCode.Success || host?.IsAlive != true) return;
+		var project = SD.ProjectService.FindProjectContainingFile(xamlFile.FileName);
+		if (project == null || !args.Projects.Contains(project)) return;
+		try {
+			var capabilities = host.RefreshCapabilitiesAsync(Snapshot(loadedXamlText, state.Version)).GetAwaiter().GetResult();
+			toolboxModel.SetItems(capabilities.Toolbox);
+			diagnostic.Foreground = Brushes.DodgerBlue;
+			diagnostic.Text = "Workflow toolbox refreshed from the successful project build (" + capabilities.Toolbox.Count + " activities).";
+		} catch (Exception exception) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = "Workflow toolbox could not refresh after build: " + exception.Message;
 		}
 	}
 
@@ -304,6 +525,75 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		Canvas.SetTop(overviewViewport, (overview.Height - height) * scroller.VerticalOffset / Math.Max(1, extent - viewport));
 	}
 
+	/// <summary>
+	/// Adds one icon button to the toolbar. <paramref name="icon"/> names an embedded
+	/// Icons/{icon}_16x.xaml (see <see cref="WorkflowIcons"/>); when it cannot be loaded the button
+	/// falls back to its text label, so a missing icon degrades a single button instead of leaving
+	/// a blank one. <paramref name="text"/> is kept either way - as the tooltip's first part and as
+	/// the automation name - because these commands are not all self-evident from an icon alone.
+	/// </summary>
+	void AddToolButton(string text, string icon, string tip, Action onClick)
+	{
+		var image = WorkflowIcons.Load(icon);
+		var button = new Button {
+			Content = image == null
+				? text
+				: new Image { Source = image, Width = 16, Height = 16, Stretch = Stretch.Uniform },
+			ToolTip = string.IsNullOrEmpty(tip) ? text : text + " - " + tip,
+			Padding = new Thickness(4, 2, 4, 2)
+		};
+		// Keeps the button findable by name for UI automation and screen readers now that its
+		// visible content is a picture rather than the label.
+		System.Windows.Automation.AutomationProperties.SetName(button, text);
+		button.Click += (_, _) => onClick();
+		toolBar.Items.Add(button);
+	}
+
+	void AddToolSeparator() => toolBar.Items.Add(new Separator());
+
+	/// <summary>
+	/// Builds the designer's command toolbar once, at construction. The separator grouping follows
+	/// what the old inline buttons expressed through wider margins: view, reorder, run, debugging,
+	/// flowchart wiring, state wiring, layout, then the editors.
+	/// </summary>
+	void BuildToolBar()
+	{
+		AddToolButton("Expand All", "ExpandAll", "Ctrl+E, X", ExpandCurrent);
+		AddToolButton("Collapse All", "CollapseAll", "Ctrl+E, C", CollapseCurrent);
+		AddToolButton("Restore", "RestoreDefaultView", "Ctrl+E, R", RestoreView);
+		AddToolSeparator();
+		AddToolButton("Move Up", "GlyphUp", "Move the selected activity earlier in its Sequence/Parallel collection", () => MoveSelected(-1));
+		AddToolButton("Move Down", "GlyphDown", "Move the selected activity later in its Sequence/Parallel collection", () => MoveSelected(1));
+		AddToolSeparator();
+		AddToolButton("Run", "Run", "Execute the current workflow", RunWorkflow);
+		AddToolButton("Validate", "ValidateDocument", "Validate the workflow model without running it", ValidateWorkflow);
+		AddToolButton("Stop", "Stop", "Cancel the active workflow run", () => _ = CancelWorkflow());
+		AddToolSeparator();
+		AddToolButton("Breakpoint", "BreakpointEnable", "Toggle a breakpoint on the selected activity (Ctrl+E, B)", ToggleBreakpoint);
+		AddToolButton("Continue", "Next", "Resume a paused workflow (Ctrl+E, D)", ContinueWorkflow);
+		AddToolButton("Resume Bookmark", "Bookmark", "Supply an external bookmark value to an idle workflow", ResumeBookmarkWorkflow);
+		AddToolButton("Step", "StepIn", "Run to the next activity record (Ctrl+E, S)", StepWorkflow);
+		AddToolButton("Step Over", "StepOver", "Run to the next activity at this scope", StepOverWorkflow);
+		AddToolButton("Step Out", "StepOut", "Run until leaving this activity scope", StepOutWorkflow);
+		AddToolSeparator();
+		AddToolButton("Connect", "Link", "Arm selected Flowchart step, then click its target (Esc cancels)", BeginOrConnectFlowSteps);
+		AddToolButton("True Branch", "CheckMark", "Arm selected Flow Decision's True branch, then click its target", () => BeginOrConnectFlowDecision(true));
+		AddToolButton("False Branch", "Cancel", "Arm selected Flow Decision's False branch, then click its target", () => BeginOrConnectFlowDecision(false));
+		AddToolButton("Set Start", "Entry", "Set the selected Flowchart step or decision as the entry node", SetSelectedFlowStart);
+		AddToolButton("Clear Next", "Unlink", "Disconnect selected Flowchart step's Next edge", () => DisconnectSelectedFlow("Next"));
+		AddToolButton("Clear True", "RemoveLink", "Disconnect selected Flow Decision's True edge", () => DisconnectSelectedFlow("True"));
+		AddToolButton("Clear False", "Disconnect", "Disconnect selected Flow Decision's False edge", () => DisconnectSelectedFlow("False"));
+		AddToolSeparator();
+		AddToolButton("Set State Target", "AddTransition", "Arm the selected StateMachine Transition, then click its target State", BeginStateTransitionConnection);
+		AddToolButton("Clear State Target", "ClearWindowContent", "Disconnect the selected StateMachine Transition", ClearStateTransitionTarget);
+		AddToolSeparator();
+		AddToolButton("Auto Layout", "AutoArrangeShapes", "Reset Flowchart node positions to the default grid", AutoLayoutFlowcharts);
+		AddToolSeparator();
+		AddToolButton("Expression", "CustomExpression", "Edit an expression for the selected activity (Ctrl+E, E)", ShowExpressionEditor);
+		AddToolButton("Arguments", "Parameter", "Edit the workflow's arguments", ShowArguments);
+		AddToolButton("Variables", "LocalVariable", "Edit the workflow's variables", ShowVariables);
+	}
+
 	static DesignerElementNode? Find(DesignerElementNode root, string id) => root.Id == id ? root : root.Children.Select(child => Find(child, id)).FirstOrDefault(value => value != null);
 
 	void BuildBreadcrumbs(DesignerElementNode root, DesignerElementNode current)
@@ -315,26 +605,6 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			button.Click += (_, _) => { drillRootId = node.Id; Rebuild(); };
 			breadcrumbs.Children.Add(button);
 		}
-		var expand = new Button { Content = "Expand All", Margin = new Thickness(12, 0, 2, 0), ToolTip = "Ctrl+E, X" }; expand.Click += (_, _) => ExpandCurrent(); breadcrumbs.Children.Add(expand);
-		var collapse = new Button { Content = "Collapse All", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Ctrl+E, C" }; collapse.Click += (_, _) => CollapseCurrent(); breadcrumbs.Children.Add(collapse);
-		var restore = new Button { Content = "Restore", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Ctrl+E, R" }; restore.Click += (_, _) => RestoreView(); breadcrumbs.Children.Add(restore);
-		var run = new Button { Content = "Run", Margin = new Thickness(8, 0, 2, 0), ToolTip = "Execute the current workflow" }; run.Click += (_, _) => RunWorkflow(); breadcrumbs.Children.Add(run);
-		var stop = new Button { Content = "Stop", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Cancel the active workflow run" }; stop.Click += async (_, _) => await CancelWorkflow(); breadcrumbs.Children.Add(stop);
-		var breakpoint = new Button { Content = "Breakpoint", Margin = new Thickness(8, 0, 2, 0), ToolTip = "Toggle a breakpoint on the selected activity (Ctrl+E, B)" }; breakpoint.Click += (_, _) => ToggleBreakpoint(); breadcrumbs.Children.Add(breakpoint);
-		var resume = new Button { Content = "Continue", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Resume a paused workflow (Ctrl+E, D)" }; resume.Click += (_, _) => ContinueWorkflow(); breadcrumbs.Children.Add(resume);
-		var step = new Button { Content = "Step", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Run to the next activity record (Ctrl+E, S)" }; step.Click += (_, _) => StepWorkflow(); breadcrumbs.Children.Add(step);
-		var stepOver = new Button { Content = "Step Over", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Run to the next activity at this scope" }; stepOver.Click += (_, _) => StepOverWorkflow(); breadcrumbs.Children.Add(stepOver);
-		var stepOut = new Button { Content = "Step Out", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Run until leaving this activity scope" }; stepOut.Click += (_, _) => StepOutWorkflow(); breadcrumbs.Children.Add(stepOut);
-		var connect = new Button { Content = "Connect", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Arm selected Flowchart step, then click its target (Esc cancels)" }; connect.Click += (_, _) => BeginOrConnectFlowSteps(); breadcrumbs.Children.Add(connect);
-		var connectTrue = new Button { Content = "True →", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Arm selected Flow Decision's True branch, then click its target" }; connectTrue.Click += (_, _) => BeginOrConnectFlowDecision(true); breadcrumbs.Children.Add(connectTrue);
-		var connectFalse = new Button { Content = "False →", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Arm selected Flow Decision's False branch, then click its target" }; connectFalse.Click += (_, _) => BeginOrConnectFlowDecision(false); breadcrumbs.Children.Add(connectFalse);
-		var clearNext = new Button { Content = "Clear Next", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Disconnect selected Flowchart step's Next edge" }; clearNext.Click += (_, _) => DisconnectSelectedFlow("Next"); breadcrumbs.Children.Add(clearNext);
-		var clearTrue = new Button { Content = "Clear True", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Disconnect selected Flow Decision's True edge" }; clearTrue.Click += (_, _) => DisconnectSelectedFlow("True"); breadcrumbs.Children.Add(clearTrue);
-		var clearFalse = new Button { Content = "Clear False", Margin = new Thickness(2, 0, 2, 0), ToolTip = "Disconnect selected Flow Decision's False edge" }; clearFalse.Click += (_, _) => DisconnectSelectedFlow("False"); breadcrumbs.Children.Add(clearFalse);
-		var autoLayout = new Button { Content = "Auto Layout", Margin = new Thickness(8, 0, 2, 0), ToolTip = "Reset Flowchart node positions to the default grid" }; autoLayout.Click += (_, _) => AutoLayoutFlowcharts(); breadcrumbs.Children.Add(autoLayout);
-		var expression = new Button { Content = "Expression…", Margin = new Thickness(8, 0, 2, 0), ToolTip = "Edit an expression for the selected activity (Ctrl+E, E)" }; expression.Click += (_, _) => ShowExpressionEditor(); breadcrumbs.Children.Add(expression);
-		var arguments = new Button { Content = "Arguments", Margin = new Thickness(8, 0, 2, 0) }; arguments.Click += (_, _) => ShowArguments(); breadcrumbs.Children.Add(arguments);
-		var variables = new Button { Content = "Variables", Margin = new Thickness(2, 0, 2, 0) }; variables.Click += (_, _) => ShowVariables(); breadcrumbs.Children.Add(variables);
 		breadcrumbs.Children.Add(overview);
 	}
 
@@ -359,13 +629,43 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		Rebuild();
 	}
 
+	Dictionary<string, string>? ShowRunInputsDialog()
+	{
+		if (host == null) return null;
+		var arguments = host.GetArgumentsAsync().GetAwaiter().GetResult()
+			.Where(argument => !string.Equals(argument.Direction, "Out", StringComparison.OrdinalIgnoreCase)).ToArray();
+		if (arguments.Length == 0) return new Dictionary<string, string>(StringComparer.Ordinal);
+		var fields = new Dictionary<string, TextBox>(StringComparer.Ordinal);
+		var panel = new StackPanel { Margin = new Thickness(12) };
+		panel.Children.Add(new TextBlock { Text = "Optional values for the workflow's In/InOut arguments. Leave a field empty to use its declared default.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) });
+		foreach (var argument in arguments) {
+			var row = new Grid { Margin = new Thickness(0, 2, 0, 2) };
+			row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(180) });
+			row.ColumnDefinitions.Add(new ColumnDefinition());
+			var label = new TextBlock { Text = $"{argument.Name} ({argument.TypeName})", VerticalAlignment = VerticalAlignment.Center, ToolTip = string.IsNullOrEmpty(argument.DefaultValue) ? "No declared default" : "Default: " + argument.DefaultValue };
+			var value = new TextBox { MinWidth = 220, ToolTip = "Enter a literal value" };
+			fields.Add(argument.Name, value);
+			row.Children.Add(label); Grid.SetColumn(value, 1); row.Children.Add(value); panel.Children.Add(row);
+		}
+		var result = new Dictionary<string, string>(StringComparer.Ordinal);
+		var run = new Button { Content = "Run", IsDefault = true, MinWidth = 75, Margin = new Thickness(4) };
+		var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 75, Margin = new Thickness(4) };
+		var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+		buttons.Children.Add(cancel); buttons.Children.Add(run); panel.Children.Add(buttons);
+		var window = new Window { Title = "Run Workflow", Width = 480, SizeToContent = SizeToContent.Height, Content = panel, Owner = Window.GetWindow(UserContent as DependencyObject) };
+		run.Click += (_, _) => { foreach (var field in fields.Where(pair => !string.IsNullOrWhiteSpace(pair.Value.Text))) result.Add(field.Key, field.Value.Text); window.DialogResult = true; };
+		return window.ShowDialog() == true ? result : null;
+	}
+
 	async void RunWorkflow()
 	{
 		if (host == null) return;
 		try {
+			var inputs = ShowRunInputsDialog();
+			if (inputs == null) return;
 			diagnostic.Foreground = Brushes.DodgerBlue;
 			diagnostic.Text = "Workflow running…";
-			var running = host.RunAsync(state.Version);
+			var running = host.RunAsync(state.Version, inputs);
 			while (!running.IsCompleted) {
 				ApplyDebugState(await host.GetDebugStateAsync());
 				await Task.Delay(100);
@@ -379,6 +679,104 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			diagnostic.Foreground = Brushes.OrangeRed;
 			diagnostic.Text = "Workflow run failed: " + exception.Message;
 		}
+	}
+
+	async void ValidateWorkflow()
+	{
+		if (host == null) return;
+		try {
+			var result = await host.ValidateWorkflowAsync(state.Version);
+			ApplyWorkflowValidation(result);
+			var first = result.Diagnostics.FirstOrDefault(diagnostic => !string.IsNullOrEmpty(diagnostic.ElementId));
+			if (first != null) NavigateToValidationDiagnostic(first);
+			diagnostic.Foreground = result.IsValid ? Brushes.ForestGreen : Brushes.OrangeRed;
+			diagnostic.Text = result.IsValid ? "Workflow model is valid." : string.Join(Environment.NewLine, result.Diagnostics.Take(8).Select(item => (item.IsWarning ? "Warning: " : "Error: ") + item.Message))
+				+ (result.Diagnostics.Count > 8 ? Environment.NewLine + "…" : "");
+			if (result.Diagnostics.Count > 0) ShowValidationResults(result.Diagnostics);
+		} catch (Exception exception) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = "Workflow validation failed: " + exception.Message;
+		}
+	}
+
+	async Task RefreshWorkflowValidationAsync()
+	{
+		if (host == null || !state.Accepted) return;
+		var version = state.Version;
+		try {
+			var result = await host.ValidateWorkflowAsync(version);
+			if (state.Version != version) return;
+			ApplyWorkflowValidation(result);
+			diagnostic.Foreground = result.IsValid ? Brushes.ForestGreen : Brushes.OrangeRed;
+			var errors = result.Diagnostics.Count(item => !item.IsWarning);
+			var warnings = result.Diagnostics.Count - errors;
+			diagnostic.Text = result.IsValid ? "Workflow model is valid." : $"Workflow validation: {errors} error(s), {warnings} warning(s).";
+		} catch {
+			// Live validation is advisory. An explicit Validate command still reports a transport
+			// failure to the user, but a transient host restart must not interrupt editing.
+		}
+	}
+
+	void ApplyWorkflowValidation(WorkflowValidationResult result)
+	{
+		validationMarkers.Clear();
+		foreach (var group in result.Diagnostics.Where(item => !string.IsNullOrWhiteSpace(item.ElementId)).GroupBy(item => item.ElementId, StringComparer.Ordinal))
+			validationMarkers[group.Key] = group.All(item => item.IsWarning);
+		Rebuild();
+	}
+
+	Brush ValidationBorder(DesignerElementNode node, Brush normal)
+	{
+		return validationMarkers.TryGetValue(node.Id, out var warning) ? warning ? Brushes.Goldenrod : Brushes.OrangeRed : normal;
+	}
+
+	void NavigateToValidationDiagnostic(WorkflowValidationDiagnostic validation)
+	{
+		if (state.Tree != null && !string.IsNullOrWhiteSpace(validation.ElementId) && Find(state.Tree, validation.ElementId) is { } node) selection.Select(node);
+	}
+
+	void ShowValidationResults(IReadOnlyList<WorkflowValidationDiagnostic> validations)
+	{
+		var items = validations.Select(validation => new WorkflowValidationListItem { Diagnostic = validation }).ToArray();
+		var list = new ListBox { Margin = new Thickness(8), ItemsSource = items, DisplayMemberPath = nameof(WorkflowValidationListItem.Text), MinWidth = 620, MinHeight = 180 };
+		var window = new Window { Title = "Workflow Validation", Owner = Window.GetWindow(UserContent as DependencyObject), Width = 760, Height = 320, Content = list, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+		void Navigate()
+		{
+			if (list.SelectedItem is WorkflowValidationListItem item) NavigateToValidationDiagnostic(item.Diagnostic);
+		}
+		list.MouseDoubleClick += (_, _) => { Navigate(); window.Close(); };
+		list.KeyDown += (_, e) => { if (e.Key == Key.Enter) { Navigate(); window.Close(); e.Handled = true; } };
+		list.SelectedIndex = 0;
+		window.ShowDialog();
+	}
+
+	void ShowWorkflowSearch()
+	{
+		if (state.Tree == null) return;
+		var query = new TextBox { Margin = new Thickness(8), ToolTip = "Search activity name, type, property, or value" };
+		var results = new ListBox { Margin = new Thickness(8), DisplayMemberPath = nameof(WorkflowSearchItem.Text), MinHeight = 220 };
+		var panel = new DockPanel();
+		DockPanel.SetDock(query, Dock.Top);
+		panel.Children.Add(query);
+		panel.Children.Add(results);
+		var all = Flatten(state.Tree).Select(node => new WorkflowSearchItem { Node = node }).ToArray();
+		void Filter()
+		{
+			var text = query.Text.Trim();
+			results.ItemsSource = all.Where(item => string.IsNullOrEmpty(text) || (item.Node.Type + "\n" + item.Node.Name + "\n" + item.Node.Id + "\n" + string.Join("\n", item.Node.Properties.Select(property => property.DisplayName + " " + property.Value))).Contains(text, StringComparison.OrdinalIgnoreCase)).ToArray();
+			results.SelectedIndex = 0;
+		}
+		var window = new Window { Title = "Find Workflow Activity", Width = 620, Height = 370, Content = panel, Owner = Window.GetWindow(UserContent as DependencyObject), WindowStartupLocation = WindowStartupLocation.CenterOwner };
+		void Navigate()
+		{
+			if (results.SelectedItem is WorkflowSearchItem item) selection.Select(item.Node);
+		}
+		query.TextChanged += (_, _) => Filter();
+		results.MouseDoubleClick += (_, _) => { Navigate(); window.Close(); };
+		results.KeyDown += (_, e) => { if (e.Key == Key.Enter) { Navigate(); window.Close(); e.Handled = true; } };
+		query.KeyDown += (_, e) => { if (e.Key == Key.Enter) { Navigate(); window.Close(); e.Handled = true; } };
+		Filter();
+		window.ShowDialog();
 	}
 
 	async void ToggleBreakpoint()
@@ -400,6 +798,35 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	}
 
 	async void ContinueWorkflow() => await ControlWorkflow(host == null ? null : () => host.ContinueRunAsync(), "Workflow resumed.");
+	async void ResumeBookmarkWorkflow()
+	{
+		if (host == null) return;
+		try {
+			var debug = await host.GetDebugStateAsync();
+			if (debug.Bookmarks.Count == 0) {
+				diagnostic.Foreground = Brushes.OrangeRed;
+				diagnostic.Text = "The active workflow is not waiting for an external bookmark.";
+				return;
+			}
+			var bookmarks = new ComboBox { Margin = new Thickness(8), ItemsSource = debug.Bookmarks, DisplayMemberPath = nameof(WorkflowBookmarkInfo.Name), SelectedValuePath = nameof(WorkflowBookmarkInfo.Name), SelectedIndex = 0, ToolTip = "Bookmark to resume" };
+			var value = new TextBox { Margin = new Thickness(8), ToolTip = "Optional string value supplied to the bookmark callback" };
+			var submit = new Button { Content = "Resume", IsDefault = true, Margin = new Thickness(8) };
+			var panel = new StackPanel();
+			panel.Children.Add(new TextBlock { Text = "Bookmark", Margin = new Thickness(8, 8, 8, 0) }); panel.Children.Add(bookmarks);
+			panel.Children.Add(new TextBlock { Text = "Value", Margin = new Thickness(8, 4, 8, 0) }); panel.Children.Add(value); panel.Children.Add(submit);
+			var window = new Window { Title = "Resume Workflow Bookmark", Width = 420, Height = 210, Content = panel, Owner = Window.GetWindow(UserContent as DependencyObject), WindowStartupLocation = WindowStartupLocation.CenterOwner };
+			submit.Click += async (_, _) => {
+				var name = bookmarks.SelectedValue as string;
+				if (string.IsNullOrWhiteSpace(name)) return;
+				if (await host.ResumeBookmarkAsync(name, value.Text)) { window.Close(); diagnostic.Foreground = Brushes.DodgerBlue; diagnostic.Text = "Bookmark '" + name + "' resumed."; }
+				else { diagnostic.Foreground = Brushes.OrangeRed; diagnostic.Text = "Bookmark '" + name + "' could not be resumed."; }
+			};
+			window.ShowDialog();
+		} catch (Exception exception) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = "Could not inspect workflow bookmarks: " + exception.Message;
+		}
+	}
 	async void StepWorkflow() => await ControlWorkflow(host == null ? null : () => host.StepRunAsync(), "Workflow will pause at the next activity.");
 	async void StepOverWorkflow() => await ControlWorkflow(host == null ? null : () => host.StepOverRunAsync(), "Workflow will pause at the next activity in this scope.");
 	async void StepOutWorkflow() => await ControlWorkflow(host == null ? null : () => host.StepOutRunAsync(), "Workflow will pause after leaving this activity scope.");
@@ -428,9 +855,17 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		HighlightSelection();
 		if (debug.IsPaused) {
 			diagnostic.Foreground = Brushes.DarkOrange;
-			diagnostic.Text = "Paused at " + (string.IsNullOrEmpty(debug.CurrentElementId) ? "an activity" : debug.CurrentElementId) + ". Continue or Step to resume.";
+			var current = debug.CallStack.LastOrDefault();
+			var location = current == null ? (string.IsNullOrEmpty(debug.CurrentElementId) ? "an activity" : debug.CurrentElementId) : current.DisplayName + " (" + current.TypeName + ")";
+			var stack = debug.CallStack.Count > 1 ? " Stack: " + string.Join(" › ", debug.CallStack.Select(frame => frame.DisplayName)) + "." : "";
+			var trace = debug.Trace.Count == 0 ? "" : " Trace: " + debug.Trace[^1] + ".";
+			var inputs = debug.Inputs.Count == 0 ? "" : " Inputs: " + string.Join(", ", debug.Inputs.Select(input => input.Key + "=" + input.Value)) + ".";
+			diagnostic.Text = "Paused at " + location + "." + stack + inputs + trace + " Continue or Step to resume.";
 			if (!string.IsNullOrEmpty(debug.CurrentElementId) && state.Tree != null && Find(state.Tree, debug.CurrentElementId) is { } node)
 				selection.Select(node);
+		} else if (debug.IsIdle) {
+			diagnostic.Foreground = Brushes.DodgerBlue;
+			diagnostic.Text = debug.Bookmarks.Count == 0 ? "Workflow is idle." : "Workflow is waiting for Bookmark: " + string.Join(", ", debug.Bookmarks.Select(bookmark => bookmark.Name)) + ". Use Resume Bookmark or Stop.";
 		}
 	}
 
@@ -539,6 +974,57 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		diagnostic.Text = "Flowchart connection cancelled.";
 	}
 
+	void BeginStateTransitionConnection()
+	{
+		if (selected?.Type != "Transition") {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = "Select a StateMachine Transition first.";
+			return;
+		}
+		pendingStateTransitionId = selected.Id;
+		diagnostic.Foreground = Brushes.DodgerBlue;
+		diagnostic.Text = "State transition target armed. Click a State card (Esc cancels).";
+	}
+
+	void ConnectArmedStateTarget(string stateId)
+	{
+		if (host == null || pendingStateTransitionId == null) return;
+		try {
+			var transition = pendingStateTransitionId;
+			Mutate(() => host.SetPropertyAsync(state.Version, transition, "$target", stateId).GetAwaiter().GetResult());
+			pendingStateTransitionId = null;
+			diagnostic.Foreground = Brushes.ForestGreen;
+			diagnostic.Text = "State transition target updated.";
+		} catch (Exception exception) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = exception.Message;
+		}
+	}
+
+	void CancelStateTransitionConnection()
+	{
+		pendingStateTransitionId = null;
+		diagnostic.Foreground = Brushes.DodgerBlue;
+		diagnostic.Text = "State transition connection cancelled.";
+	}
+
+	void ClearStateTransitionTarget()
+	{
+		if (host == null || selected?.Type != "Transition") {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = "Select a StateMachine Transition first.";
+			return;
+		}
+		try {
+			Mutate(() => host.SetPropertyAsync(state.Version, selected.Id, "$target", "").GetAwaiter().GetResult());
+			diagnostic.Foreground = Brushes.ForestGreen;
+			diagnostic.Text = "State transition target cleared.";
+		} catch (Exception exception) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = exception.Message;
+		}
+	}
+
 	void DisconnectSelectedFlow(string branch)
 	{
 		if (host == null || selected == null) {
@@ -550,6 +1036,23 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			Mutate(() => host.DisconnectFlowAsync(state.Version, selected.Id, branch).GetAwaiter().GetResult());
 			diagnostic.Foreground = Brushes.ForestGreen;
 			diagnostic.Text = "Flowchart edge disconnected.";
+		} catch (Exception exception) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = exception.Message;
+		}
+	}
+
+	void SetSelectedFlowStart()
+	{
+		if (host == null || selected == null) {
+			diagnostic.Foreground = Brushes.OrangeRed;
+			diagnostic.Text = "Select a Flowchart step or Flow Decision first.";
+			return;
+		}
+		try {
+			Mutate(() => host.SetFlowStartAsync(state.Version, selected.Id).GetAwaiter().GetResult());
+			diagnostic.Foreground = Brushes.ForestGreen;
+			diagnostic.Text = "Flowchart start node updated.";
 		} catch (Exception exception) {
 			diagnostic.Foreground = Brushes.OrangeRed;
 			diagnostic.Text = exception.Message;
@@ -600,6 +1103,24 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		var panel = new DockPanel(); DockPanel.SetDock(propertiesList, Dock.Top); DockPanel.SetDock(targetStates, Dock.Top); DockPanel.SetDock(suggestions, Dock.Top); DockPanel.SetDock(hint, Dock.Bottom); DockPanel.SetDock(validation, Dock.Bottom); DockPanel.SetDock(buttons, Dock.Bottom); panel.Children.Add(propertiesList); panel.Children.Add(targetStates); panel.Children.Add(suggestions); panel.Children.Add(hint); panel.Children.Add(validation); panel.Children.Add(buttons); panel.Children.Add(editor);
 		var window = new Window { Title = "Workflow Expression", Width = 520, Height = 280, Content = panel, Owner = Window.GetWindow(UserContent as DependencyObject) };
 		cancel.Click += (_, _) => window.Close();
+		async Task ValidateExpressionAsync()
+		{
+			if (host == null) return;
+			try {
+				var result = await host.ValidateExpressionAsync(editor.Text, selected.Id);
+				validation.Foreground = result.IsValid ? Brushes.ForestGreen : Brushes.OrangeRed;
+				validation.Text = result.IsValid ? "Expression is valid." : result.Details.Count > 0
+					? string.Join(Environment.NewLine, result.Details.Select(detail => $"{detail.Code} ({detail.Line},{detail.Column}): {detail.Message}"))
+					: string.Join(Environment.NewLine, result.Diagnostics);
+			} catch (Exception exception) {
+				validation.Foreground = Brushes.OrangeRed;
+				validation.Text = "Validation failed: " + exception.Message;
+			}
+		}
+		var validationTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+		validationTimer.Tick += async (_, _) => { validationTimer.Stop(); await ValidateExpressionAsync(); };
+		editor.TextChanged += (_, _) => { validationTimer.Stop(); validationTimer.Start(); };
+		window.Closed += (_, _) => validationTimer.Stop();
 		async Task CompleteAtCaret()
 		{
 			if (host == null) return;
@@ -615,17 +1136,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 				if (result.Items.Count > 0) suggestions.IsDropDownOpen = true;
 			} catch (Exception exception) { validation.Foreground = Brushes.OrangeRed; validation.Text = "Completion failed: " + exception.Message; }
 		}
-		validate.Click += async (_, _) => {
-			if (host == null) return;
-			try {
-				var result = await host.ValidateExpressionAsync(editor.Text, selected.Id);
-				validation.Foreground = result.IsValid ? Brushes.ForestGreen : Brushes.OrangeRed;
-				validation.Text = result.IsValid ? "Syntax is valid." : string.Join(Environment.NewLine, result.Diagnostics);
-			} catch (Exception exception) {
-				validation.Foreground = Brushes.OrangeRed;
-				validation.Text = "Validation failed: " + exception.Message;
-			}
-		};
+		validate.Click += async (_, _) => await ValidateExpressionAsync();
 		complete.Click += async (_, _) => await CompleteAtCaret();
 		editor.PreviewKeyDown += async (_, e) => {
 			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.Space) { await CompleteAtCaret(); e.Handled = true; }
@@ -715,10 +1226,11 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			stack.Children.Add(new TextBlock { Text = node.Type == "Flowchart" ? "Drop the first flow step here" : "Drop activity here", FontStyle = FontStyles.Italic, Foreground = Brushes.Gray, Margin = new Thickness(0, 4, 0, 0) });
 		if (!collapsed.Contains(node.Id)) {
 			if (node.Type == "Flowchart") stack.Children.Add(FlowchartGraph(node));
+			else if (node.Type == "StateMachine") stack.Children.Add(StateMachineGraph(node));
 			else foreach (var child in node.Children) stack.Children.Add(Box(child));
 		}
 		var border = new Border {
-			BorderBrush = node.Type == "Flowchart" ? Brushes.Teal : Brushes.SlateGray, BorderThickness = new Thickness(1.5), CornerRadius = new CornerRadius(4),
+			BorderBrush = ValidationBorder(node, node.Type == "Flowchart" ? Brushes.Teal : Brushes.SlateGray), BorderThickness = new Thickness(1.5), CornerRadius = new CornerRadius(4),
 			Background = Brushes.White, Margin = new Thickness(4), Padding = new Thickness(8), Child = stack
 		};
 		border.AllowDrop = true;
@@ -764,6 +1276,53 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			EnableFlowNodeDrag(graph, box, child);
 			graph.Children.Add(box);
 			AddFlowConnector(graph, box, child);
+		}
+		return graph;
+	}
+
+	/// <summary>StateMachine is graph-shaped just like Flowchart, but its transition metadata
+	/// lives below each virtual State node. Render it as a graph rather than a stack of nested
+	/// activity boxes so the initial/final state and transition targets are immediately visible.</summary>
+	Canvas StateMachineGraph(DesignerElementNode stateMachine)
+	{
+		var states = stateMachine.Children.Where(node => node.Type == "State").ToArray();
+		var positions = states.Select((child, index) => FlowPosition(child.Id, index)).ToArray();
+		var maximumX = positions.Length == 0 ? 0 : positions.Max(position => position.X);
+		var maximumY = positions.Length == 0 ? 0 : positions.Max(position => position.Y);
+		var graph = new Canvas { Width = Math.Max(650, maximumX + 220), MinHeight = Math.Max(120, maximumY + 120), Background = Brushes.AliceBlue, Margin = new Thickness(0, 6, 0, 0) };
+		foreach (var source in states) {
+			foreach (var transition in source.Children.Where(node => node.Type == "Transition")) {
+				var targetId = transition.Properties.FirstOrDefault(property => property.Name == "$target")?.Value;
+				if (string.IsNullOrEmpty(targetId) || states.FirstOrDefault(state => state.Id == targetId) is not { } target) continue;
+				var from = FlowPosition(source.Id, 0);
+				var to = FlowPosition(target.Id, 0);
+				var line = new Line { X1 = from.X + 190, Y1 = from.Y + 40, X2 = to.X, Y2 = to.Y + 40, Stroke = Brushes.MediumPurple, StrokeThickness = 2, IsHitTestVisible = false };
+				graph.Children.Add(line);
+				DrawArrowHead(graph, line.X1, line.Y1, line.X2, line.Y2, Brushes.MediumPurple);
+				var label = new TextBlock { Text = string.IsNullOrWhiteSpace(transition.Name) || transition.Name == "Transition" ? "Transition" : transition.Name, Foreground = Brushes.MediumPurple, FontSize = 10, Background = Brushes.AliceBlue, IsHitTestVisible = false };
+				Canvas.SetLeft(label, (line.X1 + line.X2) / 2 - 28);
+				Canvas.SetTop(label, (line.Y1 + line.Y2) / 2 - 15);
+				graph.Children.Add(label);
+			}
+		}
+		for (var index = 0; index < states.Length; index++) {
+			var state = states[index];
+			var initial = state.Properties.FirstOrDefault(property => property.Name == "$initial")?.Value == "True";
+			var final = state.Properties.FirstOrDefault(property => property.Name == "IsFinal")?.Value == "True";
+			var title = new TextBlock { Text = (initial ? "▶ " : "") + state.Name + (final ? "  ■" : ""), FontWeight = FontWeights.Bold };
+			var detail = new TextBlock { Text = state.Children.Count(child => child.Type == "Transition") + " transition(s)", Foreground = Brushes.DimGray, FontSize = 10, Margin = new Thickness(0, 4, 0, 0) };
+			var card = new Border { Width = 190, BorderBrush = ValidationBorder(state, initial ? Brushes.ForestGreen : Brushes.MediumPurple), BorderThickness = new Thickness(initial ? 2.5 : 1.5), CornerRadius = new CornerRadius(8), Background = Brushes.White, Padding = new Thickness(8), Child = new StackPanel { Children = { title, detail } }, Tag = state.Id };
+			var position = FlowPosition(state.Id, index);
+			Canvas.SetLeft(card, position.X);
+			Canvas.SetTop(card, position.Y);
+			card.MouseLeftButtonDown += (_, e) => {
+				if (pendingStateTransitionId != null) ConnectArmedStateTarget(state.Id);
+				else selection.Select(new[] { state }, Keyboard.Modifiers.HasFlag(ModifierKeys.Control) ? DesignerSelectionOperation.Toggle : DesignerSelectionOperation.Replace);
+				e.Handled = true;
+			};
+			EnableFlowNodeDrag(graph, card, state);
+			boxesById[state.Id] = card;
+			graph.Children.Add(card);
 		}
 		return graph;
 	}
@@ -825,10 +1384,30 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		var to = FlowPosition(target.Id, 0);
 		var line = new Line { X1 = from.X + 190, Y1 = from.Y + 32, X2 = to.X, Y2 = to.Y + 32, Stroke = color, StrokeThickness = 2, IsHitTestVisible = false };
 		graph.Children.Add(line);
+		DrawArrowHead(graph, line.X1, line.Y1, line.X2, line.Y2, color);
 		var text = new TextBlock { Text = label, Foreground = color, FontSize = 10, IsHitTestVisible = false };
 		Canvas.SetLeft(text, (line.X1 + line.X2) / 2 - 12);
 		Canvas.SetTop(text, (line.Y1 + line.Y2) / 2 - 14);
 		graph.Children.Add(text);
+	}
+
+	static void DrawArrowHead(Canvas graph, double fromX, double fromY, double toX, double toY, Brush color)
+	{
+		var dx = toX - fromX;
+		var dy = toY - fromY;
+		var length = Math.Sqrt(dx * dx + dy * dy);
+		if (length < 1) return;
+		var ux = dx / length;
+		var uy = dy / length;
+		var baseX = toX - ux * 10;
+		var baseY = toY - uy * 10;
+		var perpendicularX = -uy * 4;
+		var perpendicularY = ux * 4;
+		graph.Children.Add(new Polygon {
+			Points = new PointCollection { new Point(toX, toY), new Point(baseX + perpendicularX, baseY + perpendicularY), new Point(baseX - perpendicularX, baseY - perpendicularY) },
+			Fill = color,
+			IsHitTestVisible = false
+		});
 	}
 
 	WorkflowNodePosition FlowPosition(string id, int index)
@@ -1003,6 +1582,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 
 	public override void Dispose()
 	{
+		SD.BuildService.BuildFinished -= buildFinishedHandler;
 		properties.Clear();
 		OutputChannel.Write("WorkflowDesigner", "Designer view disposed");
 		host?.Dispose();

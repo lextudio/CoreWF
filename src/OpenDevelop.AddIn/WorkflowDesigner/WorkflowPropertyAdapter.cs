@@ -61,8 +61,11 @@ sealed class WorkflowPropertyDescriptor : PropertyDescriptor
 
 	public override Type ComponentType => typeof(WorkflowPropertyAdapter);
 	public override string DisplayName => string.IsNullOrEmpty(property.DisplayName) ? property.Name : property.DisplayName;
+	public override string Description => property.Description ?? "";
 	public override bool IsReadOnly => property.IsReadOnly;
 	public override Type PropertyType => typeof(string);
+	public override TypeConverter Converter => property.Kind == "Enum" && property.AllowedValues.Count != 0
+		? new WorkflowChoiceConverter(property.AllowedValues) : base.Converter;
 	public override bool CanResetValue(object component) => false;
 	public override void ResetValue(object component) { }
 	public override bool ShouldSerializeValue(object component) => true;
@@ -75,4 +78,13 @@ sealed class WorkflowPropertyDescriptor : PropertyDescriptor
 		property.Value = serialized;
 		OnValueChanged(component, EventArgs.Empty);
 	}
+}
+
+sealed class WorkflowChoiceConverter : StringConverter
+{
+	readonly StandardValuesCollection values;
+	public WorkflowChoiceConverter(System.Collections.Generic.IEnumerable<string> values) => this.values = new StandardValuesCollection(values.ToArray());
+	public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
+	public override bool GetStandardValuesExclusive(ITypeDescriptorContext? context) => true;
+	public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context) => values;
 }
