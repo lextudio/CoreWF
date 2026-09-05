@@ -44,14 +44,14 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerCapabilities GetCapabilities(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		return Capabilities(Get(documentId).Snapshot);
+		return Capabilities(Get(sessionId, documentId).Snapshot);
 	}
 
 	[JsonRpcMethod("workflow/refresh-capabilities")]
 	public DesignerCapabilities RefreshCapabilities(string sessionId, string documentId, DesignerDocumentSnapshot snapshot)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		// A project build changes the activity assemblies, not the in-memory XAML document.
 		// Keep its undo history and unsaved edits intact while refreshing only the safe metadata
 		// consumed by the toolbox/expression catalog.
@@ -135,7 +135,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState SetProperty(string sessionId, string documentId, long baseVersion, string elementId, string propertyName, string value)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.SetProperty(elementId, propertyName, value))
@@ -152,7 +152,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState AddElement(string sessionId, string documentId, long baseVersion, string parentId, DesignerToolboxItemInfo item, string proposedName, double x, double y)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		var addedId = session.Document.AddChild(parentId, string.IsNullOrEmpty(item.TypeName) ? item.Name : item.TypeName);
@@ -167,7 +167,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState DeleteElements(string sessionId, string documentId, long baseVersion, string[] elementIds)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.RemoveMany(elementIds))
@@ -180,7 +180,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool CopyElements(string sessionId, string documentId, string[] elementIds)
 	{
 		documents.ValidateSession(sessionId);
-		var document = Get(documentId).Document;
+		var document = Get(sessionId, documentId).Document;
 		if (!document.Copy(elementIds)) return false;
 		clipboard = document.Clipboard.ToList();
 		return true;
@@ -190,7 +190,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState CutElements(string sessionId, string documentId, long baseVersion, string[] elementIds)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		if (!session.Document.Copy(elementIds)) throw new InvalidOperationException("The selected workflow item cannot be cut.");
 		var before = session.Document.ToXaml();
@@ -204,7 +204,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState PasteElements(string sessionId, string documentId, long baseVersion, string parentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		var pasted = session.Document.Paste(parentId, clipboard);
@@ -219,7 +219,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState MoveElement(string sessionId, string documentId, long baseVersion, string elementId, int offset)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		var movedId = session.Document.MoveSibling(elementId, offset);
@@ -231,9 +231,9 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	}
 
 	[JsonRpcMethod("design/undo")]
-	public DesignerSessionState Undo(string sessionId, string documentId, long baseVersion) { documents.ValidateSession(sessionId); return RestoreHistory(Get(documentId), baseVersion, undo: true); }
+	public DesignerSessionState Undo(string sessionId, string documentId, long baseVersion) { documents.ValidateSession(sessionId); return RestoreHistory(Get(sessionId, documentId), baseVersion, undo: true); }
 	[JsonRpcMethod("design/redo")]
-	public DesignerSessionState Redo(string sessionId, string documentId, long baseVersion) { documents.ValidateSession(sessionId); return RestoreHistory(Get(documentId), baseVersion, undo: false); }
+	public DesignerSessionState Redo(string sessionId, string documentId, long baseVersion) { documents.ValidateSession(sessionId); return RestoreHistory(Get(sessionId, documentId), baseVersion, undo: false); }
 
 	DesignerSessionState RestoreHistory(DocumentSession session, long baseVersion, bool undo)
 	{
@@ -259,7 +259,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerEditSet Flush(string sessionId, string documentId, long baseVersion)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		return new DesignerEditSet {
 			SessionId = sessionId, DocumentId = documentId, BaseVersion = session.Version,
@@ -271,7 +271,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public object Close(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		documents.Remove(documentId, _ => { });
+		documents.Remove(sessionId, documentId, _ => { });
 		return new();
 	}
 
@@ -279,7 +279,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public List<WorkflowArgumentInfo> GetArguments(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		return Get(documentId).Document.GetArguments().Select(argument => new WorkflowArgumentInfo {
+		return Get(sessionId, documentId).Document.GetArguments().Select(argument => new WorkflowArgumentInfo {
 			Name = argument.Name, TypeName = argument.TypeName, Direction = argument.Direction, DefaultValue = argument.DefaultValue
 		}).ToList();
 	}
@@ -288,7 +288,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState AddArgument(string sessionId, string documentId, long baseVersion, string name, string typeName, string defaultValue, string direction = "In")
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.AddArgument(name, typeName, defaultValue, direction)) throw new InvalidOperationException("Workflow argument creation was rejected. Check its name, direction, type and default value.");
@@ -300,7 +300,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState RemoveArgument(string sessionId, string documentId, long baseVersion, string name)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.RemoveArgument(name)) throw new InvalidOperationException("Workflow argument removal was rejected.");
@@ -312,7 +312,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState UpdateArgument(string sessionId, string documentId, long baseVersion, string oldName, string newName, string typeName, string defaultValue, string direction = "In")
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.UpdateArgument(oldName, newName, typeName, defaultValue, direction)) throw new InvalidOperationException("Workflow argument update was rejected. Check its name, direction, type and default value.");
@@ -324,21 +324,21 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public List<WorkflowVariableInfo> GetVariables(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		return Get(documentId).Document.GetVariables().Select(variable => new WorkflowVariableInfo { Name = variable.Name, TypeName = variable.TypeName, Scope = variable.Scope, ScopeId = variable.ScopeId, DefaultValue = variable.DefaultValue }).ToList();
+		return Get(sessionId, documentId).Document.GetVariables().Select(variable => new WorkflowVariableInfo { Name = variable.Name, TypeName = variable.TypeName, Scope = variable.Scope, ScopeId = variable.ScopeId, DefaultValue = variable.DefaultValue }).ToList();
 	}
 
 	[JsonRpcMethod("workflow/get-variable-scopes")]
 	public List<WorkflowVariableInfo> GetVariableScopes(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		return Get(documentId).Document.GetVariableScopes().Select(scope => new WorkflowVariableInfo { Scope = scope.Scope, ScopeId = scope.ScopeId }).ToList();
+		return Get(sessionId, documentId).Document.GetVariableScopes().Select(scope => new WorkflowVariableInfo { Scope = scope.Scope, ScopeId = scope.ScopeId }).ToList();
 	}
 
 	[JsonRpcMethod("workflow/add-variable")]
 	public DesignerSessionState AddVariable(string sessionId, string documentId, long baseVersion, string name, string typeName, string defaultValue, string scopeId = "")
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.AddVariable(name, typeName, defaultValue, scopeId)) throw new InvalidOperationException("Variable creation was rejected. Check its scope, name, type and default value.");
@@ -350,7 +350,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState UpdateVariable(string sessionId, string documentId, long baseVersion, string oldName, string newName, string typeName, string defaultValue, string scopeId = "")
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.UpdateVariable(oldName, newName, typeName, defaultValue, scopeId)) throw new InvalidOperationException("Variable update was rejected. Check its name, type and default value.");
@@ -362,7 +362,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState RemoveVariable(string sessionId, string documentId, long baseVersion, string name, string scopeId = "")
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.RemoveVariable(name, scopeId)) throw new InvalidOperationException("Workflow variable removal was rejected.");
@@ -374,7 +374,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public WorkflowExpressionValidation ValidateExpression(string sessionId, string documentId, string expression, string? elementId = null)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		var isVisualBasic = expression.StartsWith("=vb:", StringComparison.OrdinalIgnoreCase);
 		var text = expression.StartsWith("=", StringComparison.Ordinal) ? expression[(isVisualBasic ? 4 : 1)..] : expression;
 		if (string.IsNullOrWhiteSpace(text)) return new WorkflowExpressionValidation { Diagnostics = { "Expression cannot be empty." } };
@@ -393,7 +393,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public WorkflowValidationResult ValidateWorkflow(string sessionId, string documentId, long baseVersion)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var rootActivity = session.Document.Root;
 		if (rootActivity == null) return new WorkflowValidationResult { Diagnostics = { new WorkflowValidationDiagnostic { Message = "No workflow implementation is loaded." } } };
@@ -454,7 +454,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public WorkflowExpressionCompletion CompleteExpression(string sessionId, string documentId, string expression, string prefix, string? elementId = null)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		var roslyn = CompleteWithRoslyn(session, expression, prefix, elementId);
 		var visualBasic = expression.StartsWith("=vb:", StringComparison.OrdinalIgnoreCase);
 		var terms = visualBasic ? new[] { "True", "False", "Nothing", "If", "AndAlso", "OrElse", "Not", "String", "Math" } : new[] { "true", "false", "null", "this", "new", "nameof", "string", "Math" };
@@ -616,7 +616,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public WorkflowRunResult Run(string sessionId, string documentId, long baseVersion, Dictionary<string, string>? inputs = null)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		if (session.Document.Root == null) return new WorkflowRunResult { Message = "No workflow is loaded." };
 		var expressionLanguages = UnavailableExpressionLanguages(session.Document.Root);
@@ -772,7 +772,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool CancelRun(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) {
 			if (session.RunningApplication == null) return false;
 			session.WasCancelled = true;
@@ -786,7 +786,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public WorkflowDebugState ToggleBreakpoint(string sessionId, string documentId, string elementId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		if (session.Document.Find(elementId) == null) throw new InvalidOperationException("Breakpoints can only be set on activity nodes.");
 		lock (session.RunGate) {
 			if (!session.Breakpoints.Add(elementId)) session.Breakpoints.Remove(elementId);
@@ -798,7 +798,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public WorkflowDebugState GetDebugState(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) return DebugState(session);
 	}
 
@@ -806,7 +806,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool ContinueRun(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) return session.DebugRun?.Resume(WorkflowDebugRun.StepMode.None) == true;
 	}
 
@@ -814,7 +814,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool ResumeBookmark(string sessionId, string documentId, string bookmarkName, string? value = null)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) {
 			if (session.RunningApplication == null || string.IsNullOrWhiteSpace(bookmarkName)) return false;
 			session.DebugRun?.ClearBookmarks();
@@ -826,7 +826,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool StepRun(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) return session.DebugRun?.Resume(WorkflowDebugRun.StepMode.Next) == true;
 	}
 
@@ -834,7 +834,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool StepOverRun(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) return session.DebugRun?.Resume(WorkflowDebugRun.StepMode.Over) == true;
 	}
 
@@ -842,7 +842,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public bool StepOutRun(string sessionId, string documentId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		lock (session.RunGate) return session.DebugRun?.Resume(WorkflowDebugRun.StepMode.Out) == true;
 	}
 
@@ -850,7 +850,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState ConnectFlow(string sessionId, string documentId, long baseVersion, string sourceId, string targetId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.ConnectFlowSteps(sourceId, targetId)) throw new InvalidOperationException("The selected activities are not connectable Flowchart steps, or the connection would create a cycle.");
@@ -862,7 +862,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState ConnectFlowDecision(string sessionId, string documentId, long baseVersion, string sourceId, string targetId, bool trueBranch)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.ConnectFlowDecision(sourceId, targetId, trueBranch)) throw new InvalidOperationException("Select a Flow Decision and a Flowchart step in the same Flowchart.");
@@ -874,7 +874,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState SetFlowStart(string sessionId, string documentId, long baseVersion, string elementId)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.SetFlowStart(elementId)) throw new InvalidOperationException("Select a Flowchart step or Flow Decision to set the start node.");
@@ -886,7 +886,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState DisconnectFlow(string sessionId, string documentId, long baseVersion, string sourceId, string branch)
 	{
 		documents.ValidateSession(sessionId);
-		var session = Get(documentId);
+		var session = Get(sessionId, documentId);
 		EnsureVersion(session, baseVersion);
 		var before = session.Document.ToXaml();
 		if (!session.Document.DisconnectFlow(sourceId, branch)) throw new InvalidOperationException("The selected Flowchart edge cannot be disconnected.");
@@ -1127,6 +1127,13 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 				if (id == null || childNodes.FirstOrDefault(node => node.Id == id) is not { } childNode) continue;
 				childNode.Properties.Add(new DesignerPropertyInfo { Name = "$flowNext", DisplayName = "Next", Value = FlowNodeId(step.Next) ?? "", IsReadOnly = true, Category = "Flowchart" });
 			}
+			// Which node the flowchart actually starts at. The designer already had a "Set Start"
+			// command (SetFlowStartAsync), but nothing published the CURRENT start back, so the
+			// canvas had no way to draw WF's green Start node or its arrow into the entry step.
+			properties.Add(new DesignerPropertyInfo {
+				Name = "$flowStartNode", DisplayName = "Start node",
+				Value = FlowNodeId(flowchart.StartNode) ?? "", IsReadOnly = true, Category = "Flowchart"
+			});
 			for (var index = 0; index < flowchart.Nodes.Count; index++) {
 				if (flowchart.Nodes[index] is not FlowDecision decision) continue;
 				childNodes.Add(new DesignerElementNode {
@@ -1230,7 +1237,7 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 
 	static int Count(Activity activity) => 1 + InspectChildren(activity).Sum(Count);
 
-	DocumentSession Get(string documentId) => documents.Get(documentId);
+	DocumentSession Get(string sessionId, string documentId) => documents.Get(sessionId, documentId);
 	static void EnsureVersion(DocumentSession session, long candidate)
 	{
 		if (candidate != session.Version) throw new InvalidOperationException($"Stale version {candidate}; current is {session.Version}.");

@@ -28,7 +28,7 @@
     <ProjectReference Include="..\WorkflowDesigner.Host\WorkflowDesigner.Host.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" SkipGetTargetFrameworkProperties="true" />
     <!-- DevFlow attributes are development/test instrumentation, matching the other designer
          addins; the runtime agent is already supplied by the OpenDevelop Debug host. -->
-    <PackageReference Include="LeXtudio.DevFlow.Agent.Core" Version="0.2.3" Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="LeXtudio.DevFlow.Agent.Core" Version="0.2.3" />
   </ItemGroup>
   <ItemGroup><None Include="WorkflowDesigner.addin" /></ItemGroup>
   <ItemGroup>

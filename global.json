@@ -1,0 +1,15 @@
+{
+  // The OpenDevelop addin under src/OpenDevelop.AddIn ProjectReferences OpenDevelop's own
+  // projects (ICSharpCode.SharpDevelop, AvalonEdit, ...), and several of those are
+  // Sdk="LibreWPF.Sdk" - a NuGet-delivered MSBuild SDK. MSBuild resolves global.json once, from
+  // the ENTRY POINT of the build, so building the addin from this repository never consults
+  // OpenDevelop's own global.json and the NuGet SDK resolver fails with "no version specified in
+  // the project or global.json" (MSB4236). Keep this version in lock-step with OpenDevelop's
+  // global.json; the Stride fork pins it the same way and for the same reason.
+  //
+  // Deliberately no "sdk" section: pinning the .NET SDK version here would constrain every other
+  // project in this repository, which this entry has no business doing.
+  "msbuild-sdks": {
+    "LibreWPF.Sdk": "0.1.0-preview.45"
+  }
+}

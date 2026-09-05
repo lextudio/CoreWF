@@ -1242,7 +1242,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			}
 		}
 		var border = new Border {
-			BorderBrush = ValidationBorder(node, node.Type == "Flowchart" ? Brushes.Teal : ActivityEdge), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(3),
+			BorderBrush = ValidationBorder(node, node.Type switch { "Flowchart" => Brushes.Teal, "FlowDecision" => DecisionEdge, _ => ActivityEdge }), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(3),
 			Background = ActivityBody, Margin = new Thickness(4), Child = stack
 		};
 		// The workbench theme can be dark, and these boxes are deliberately light (WF's canvas is a
@@ -1294,7 +1294,64 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			graph.Children.Add(box);
 			AddFlowConnector(graph, box, child);
 		}
+		// After the nodes, not before: the marker sits beside its entry step, and when that step is
+		// not the leftmost one the marker's position can fall behind another node's box. Canvas
+		// paints in child order, so drawing it last keeps it visible instead of hidden underneath.
+		DrawFlowStart(graph, flowchart);
 		return graph;
+	}
+
+	/// <summary>
+	/// Draws WF's green Start node and its arrow into the entry step. Without it a flowchart shows
+	/// several boxes with no indication of which one runs first - the single most recognisable
+	/// element of the WF flowchart canvas, and the visual counterpart to the "Set Start" command.
+	/// Draws nothing when the host reports no start node (an empty or not-yet-wired flowchart).
+	/// </summary>
+	void DrawFlowStart(Canvas graph, DesignerElementNode flowchart)
+	{
+		var startId = flowchart.Properties?.FirstOrDefault(property => property.Name == "$flowStartNode")?.Value;
+		if (string.IsNullOrEmpty(startId)) return;
+		var index = flowchart.Children.FindIndex(child => child.Id == startId);
+		if (index < 0) return;
+		var target = FlowPosition(startId!, index);
+
+		// Prefer WF's placement - marker above the entry step with the arrow pointing down into it -
+		// but a step sitting near the top of the canvas has no room for that, and drawing it there
+		// anyway put the marker on top of the node with its arrow collapsed to zero length. Fall
+		// back to the left, where there is always room, instead of overlapping the diagram.
+		const double radius = 15, captionHeight = 13, gap = 10;
+		var above = target.Y >= radius * 2 + captionHeight + gap * 2;
+		var centreX = above ? target.X + 95 : Math.Max(radius + 2, target.X - radius * 2 - gap * 2);
+		var centreY = above ? target.Y - radius - captionHeight - gap : target.Y + 22;
+
+		var circle = new Ellipse {
+			Width = radius * 2, Height = radius * 2, Fill = Brushes.White,
+			Stroke = Brushes.ForestGreen, StrokeThickness = 2,
+			ToolTip = "Start - the flowchart's entry node", IsHitTestVisible = false
+		};
+		Canvas.SetLeft(circle, centreX - radius);
+		Canvas.SetTop(circle, centreY - radius);
+		graph.Children.Add(circle);
+
+		var glyph = new Polygon {
+			Points = new PointCollection { new Point(0, 0), new Point(9, 5), new Point(0, 10) },
+			Fill = Brushes.ForestGreen, IsHitTestVisible = false
+		};
+		Canvas.SetLeft(glyph, centreX - 3);
+		Canvas.SetTop(glyph, centreY - 5);
+		graph.Children.Add(glyph);
+
+		var caption = new TextBlock { Text = "Start", Foreground = Brushes.ForestGreen, FontSize = 10, IsHitTestVisible = false };
+		Canvas.SetLeft(caption, centreX - 13);
+		Canvas.SetTop(caption, centreY + radius);
+		graph.Children.Add(caption);
+
+		var (x1, y1, x2, y2) = above
+			? (centreX, centreY + radius + captionHeight, centreX, target.Y)
+			: (centreX + radius, centreY, target.X, centreY);
+		var line = new Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = Brushes.ForestGreen, StrokeThickness = 2, IsHitTestVisible = false };
+		graph.Children.Add(line);
+		DrawArrowHead(graph, x1, y1, x2, y2, Brushes.ForestGreen);
 	}
 
 	/// <summary>StateMachine is graph-shaped just like Flowchart, but its transition metadata
@@ -1480,6 +1537,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	static readonly Brush ActivityHeader = new SolidColorBrush(Color.FromRgb(0xEF, 0xF1, 0xF4));
 	static readonly Brush ActivityEdge = new SolidColorBrush(Color.FromRgb(0xA5, 0xAF, 0xBA));
 	static readonly Brush ConnectorInk = new SolidColorBrush(Color.FromRgb(0x8A, 0x96, 0xA3));
+	static readonly Brush DecisionEdge = new SolidColorBrush(Color.FromRgb(0xB0, 0x76, 0x0E));
 
 	/// <summary>
 	/// The downward step marker WF draws between consecutive activities in a sequence body, so
@@ -1567,8 +1625,20 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		// chevron - visually separated from the body. Previously this was a bare bold TextBlock,
 		// so an activity read as an undifferentiated rounded rectangle.
 		var header = new StackPanel { Orientation = Orientation.Horizontal };
-		if (ActivityIcon(node.Type) is { } icon)
+		if (node.Type == "FlowDecision") {
+			// WF draws a decision as a diamond. The box itself has to stay a Border (drag, drop,
+			// selection and boxesById all depend on it), so the diamond is carried in the header
+			// as a drawn glyph rather than by rotating the container - which would break
+			// hit-testing and the layout of everything inside it.
+			var diamond = new Polygon {
+				Points = new PointCollection { new Point(7, 0), new Point(14, 7), new Point(7, 14), new Point(0, 7) },
+				Fill = Brushes.White, Stroke = DecisionEdge, StrokeThickness = 1.6,
+				Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center
+			};
+			header.Children.Add(diamond);
+		} else if (ActivityIcon(node.Type) is { } icon) {
 			header.Children.Add(new Image { Source = icon, Width = 16, Height = 16, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center });
+		}
 		header.Children.Add(label);
 
 		if (node.Children.Count > 0) {
