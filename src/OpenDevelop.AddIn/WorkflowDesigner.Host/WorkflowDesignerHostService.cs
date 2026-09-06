@@ -444,6 +444,37 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		return State(session);
 	}
 
+	[JsonRpcMethod("workflow/get-imports")]
+	public List<string> GetImports(string sessionId, string documentId)
+	{
+		documents.ValidateSession(sessionId);
+		return Get(sessionId, documentId).Document.GetImports().ToList();
+	}
+
+	[JsonRpcMethod("workflow/add-import")]
+	public DesignerSessionState AddImport(string sessionId, string documentId, long baseVersion, string namespaceName)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(sessionId, documentId);
+		EnsureVersion(session, baseVersion);
+		var before = session.Document.ToXaml();
+		if (!session.Document.AddImport(namespaceName)) throw new InvalidOperationException("'" + namespaceName + "' is not a namespace this workflow can import, or it is already imported.");
+		RecordMutation(session, before);
+		return State(session);
+	}
+
+	[JsonRpcMethod("workflow/remove-import")]
+	public DesignerSessionState RemoveImport(string sessionId, string documentId, long baseVersion, string namespaceName)
+	{
+		documents.ValidateSession(sessionId);
+		var session = Get(sessionId, documentId);
+		EnsureVersion(session, baseVersion);
+		var before = session.Document.ToXaml();
+		if (!session.Document.RemoveImport(namespaceName)) throw new InvalidOperationException("The workflow does not import '" + namespaceName + "'.");
+		RecordMutation(session, before);
+		return State(session);
+	}
+
 	[JsonRpcMethod("workflow/validate-expression")]
 	public WorkflowExpressionValidation ValidateExpression(string sessionId, string documentId, string expression, string? elementId = null)
 	{
@@ -453,7 +484,15 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var text = expression.StartsWith("=", StringComparison.Ordinal) ? expression[(isVisualBasic ? 4 : 1)..] : expression;
 		if (string.IsNullOrWhiteSpace(text)) return new WorkflowExpressionValidation { Diagnostics = { "Expression cannot be empty." } };
 		var variables = session.Document.GetExpressionSymbolsVisibleAt(elementId).Where(variable => System.Text.RegularExpressions.Regex.IsMatch(variable.Name, "^[A-Za-z_][A-Za-z0-9_]*$")).GroupBy(variable => variable.Name, StringComparer.Ordinal).Select(group => group.First()).ToArray();
-		var prefix = isVisualBasic ? "Option Strict Off\nModule WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn (" : "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (";
+		// The document's imports are what CoreWF compiles the expression against at run time, so
+		// validating without them rejected every expression that is not fully qualified.
+		var imports = ResolvableImports(session);
+		var usings = isVisualBasic
+			? string.Concat(imports.Select(name => "Imports " + name + "\n"))
+			: string.Concat(imports.Select(name => "using " + name + "; "));
+		// Visual Basic requires Option statements to precede any Imports, so the two languages
+		// place the import block differently.
+		var prefix = (isVisualBasic ? "" : usings) + (isVisualBasic ? "Option Strict Off\n" + usings + "Module WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn (" : "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (");
 		var suffix = isVisualBasic ? ")\nEnd Function\nEnd Module" : "); } }";
 		var source = prefix + text + suffix;
 		Compilation compilation = isVisualBasic ? VisualBasicCompilation.Create("WorkflowExpression", new[] { VisualBasicSyntaxTree.ParseText(source) }, MetadataReferences(session), new VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary)) : CSharpCompilation.Create("WorkflowExpression", new[] { CSharpSyntaxTree.ParseText(source) }, MetadataReferences(session), new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
@@ -663,6 +702,27 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		"string" => typeof(string), "int" or "int32" => typeof(int), "bool" or "boolean" => typeof(bool),
 		"double" => typeof(double), "decimal" => typeof(decimal), "datetime" => typeof(DateTime), _ => null
 	};
+
+	/// <summary>The document's imports, minus any namespace the expression compilation cannot see.
+	/// The metadata references available here are the trusted platform assemblies plus the
+	/// project's own, which need not cover every namespace a workflow declares; emitting a using
+	/// for a namespace that is not there would fail every expression with an unrelated error.</summary>
+	static IReadOnlyList<string> ResolvableImports(DocumentSession session)
+	{
+		var imports = session.Document.GetImports();
+		var probe = CSharpCompilation.Create("WorkflowImports", Array.Empty<SyntaxTree>(), MetadataReferences(session));
+		return imports.Where(name => Resolves(probe.GlobalNamespace, name)).ToList();
+
+		static bool Resolves(INamespaceSymbol root, string name)
+		{
+			var current = root;
+			foreach (var part in name.Split('.')) {
+				current = current.GetNamespaceMembers().FirstOrDefault(member => string.Equals(member.Name, part, StringComparison.Ordinal))!;
+				if (current == null) return false;
+			}
+			return true;
+		}
+	}
 
 	static IEnumerable<MetadataReference> MetadataReferences(DocumentSession session)
 	{

@@ -157,6 +157,49 @@ public sealed class WorkflowDocumentTests
 	}
 
 	[Fact]
+	public void Expressions_are_validated_against_the_workflows_own_imports()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence()).ToXaml() } }
+		});
+		// System is one of CoreWF's default imports, so an unqualified DateTime resolves the way
+		// it will at run time.
+		Assert.True(service.ValidateExpression("session", "document", "=DateTime.Now").IsValid);
+		Assert.Contains("System", service.GetImports("session", "document"));
+
+		// A namespace that is not imported must not resolve, or validation would accept
+		// expressions the runtime rejects.
+		Assert.False(service.ValidateExpression("session", "document", "=StringBuilder.Equals(1, 1)").IsValid);
+		state = service.AddImport("session", "document", state.Version, "System.Text");
+		Assert.Contains("System.Text", service.GetImports("session", "document"));
+		Assert.True(service.ValidateExpression("session", "document", "=StringBuilder.Equals(1, 1)").IsValid);
+
+		service.RemoveImport("session", "document", state.Version, "System.Text");
+		Assert.DoesNotContain("System.Text", service.GetImports("session", "document"));
+	}
+
+	[Fact]
+	public void An_added_import_survives_the_xaml_round_trip()
+	{
+		var document = Load(new Sequence());
+		Assert.True(document.AddImport("System.Text"));
+		Assert.False(document.AddImport("System.Text"));
+		Assert.False(document.AddImport("not a namespace"));
+
+		var reloaded = new WorkflowDocument();
+		reloaded.Reset(document.ToXaml());
+		Assert.True(reloaded.LastParseSucceeded, reloaded.Error);
+		Assert.Contains("System.Text", reloaded.GetImports());
+		// The defaults are materialized on first edit, so removing one actually removes it.
+		Assert.Contains("System", reloaded.GetImports());
+		Assert.True(reloaded.RemoveImport("System"));
+		Assert.DoesNotContain("System", reloaded.GetImports());
+	}
+
+	[Fact]
 	public void An_unreadable_project_assembly_does_not_take_the_toolbox_down_with_it()
 	{
 		var service = new WorkflowDesignerHostService("aa");

@@ -154,6 +154,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 				switch (e.Key) {
 					case Key.A: ShowArguments(); break;
 					case Key.V: ShowVariables(); break;
+					case Key.I: ShowImports(); break;
 					case Key.E: ShowExpressionEditor(); break;
 					case Key.B: ToggleBreakpoint(); break;
 					case Key.D: ContinueWorkflow(); break;
@@ -654,6 +655,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		AddToolButton("Expression", "CustomExpression", "Edit an expression for the selected activity (Ctrl+E, E)", ShowExpressionEditor);
 		AddToolButton("Arguments", "Parameter", "Edit the workflow's arguments", ShowArguments);
 		AddToolButton("Variables", "LocalVariable", "Edit the workflow's variables", ShowVariables);
+		AddToolButton("Imports", "Link", "Edit the namespaces the workflow's expressions are compiled against (Ctrl+E, I)", ShowImports);
 	}
 
 	static DesignerElementNode? Find(DesignerElementNode root, string id) => root.Id == id ? root : root.Children.Select(child => Find(child, id)).FirstOrDefault(value => value != null);
@@ -1250,6 +1252,29 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		grid.PreviewKeyDown += (_, e) => { if (e.Key == Key.Delete && grid.SelectedItem is WorkflowArgumentInfo argument) { RunMutation(() => host.RemoveArgumentAsync(state.Version, argument.Name).GetAwaiter().GetResult()); e.Handled = true; } };
 		var panel = new DockPanel(); var bar = new StackPanel { Orientation = Orientation.Horizontal }; bar.Children.Add(name); bar.Children.Add(direction); bar.Children.Add(type); bar.Children.Add(defaultValue); bar.Children.Add(add); bar.Children.Add(update); bar.Children.Add(remove); bar.Children.Add(error); DockPanel.SetDock(bar, Dock.Top); panel.Children.Add(bar); panel.Children.Add(grid);
 		new Window { Title = "Workflow Arguments", Width = 540, Height = 320, Content = panel }.ShowDialog();
+	}
+
+	/// <summary>Edits the workflow's imported namespaces - the same list CoreWF compiles its text
+	/// expressions against, so an import added here is what makes an unqualified type name resolve
+	/// both in the expression editor and at run time.</summary>
+	void ShowImports()
+	{
+		if (host == null) return;
+		var list = new ListBox { Margin = new Thickness(8) };
+		var namespaceName = new TextBox { Width = 260, Margin = new Thickness(4), ToolTip = "Namespace to import, e.g. System.Text" };
+		var add = new Button { Content = "Add Import", Margin = new Thickness(4), IsDefault = true };
+		var remove = new Button { Content = "Remove Selected", Margin = new Thickness(4) };
+		var error = new TextBlock { Foreground = Brushes.OrangeRed, Margin = new Thickness(4), VerticalAlignment = VerticalAlignment.Center };
+		void Refresh() => list.ItemsSource = host.GetImportsAsync().GetAwaiter().GetResult();
+		bool RunMutation(Func<DesignerSessionState> action) { try { error.Text = ""; Mutate(action); Refresh(); return true; } catch (Exception exception) { error.Text = exception.Message; diagnostic.Text = exception.Message; return false; } }
+		add.Click += (_, _) => { if (!string.IsNullOrWhiteSpace(namespaceName.Text) && RunMutation(() => host.AddImportAsync(state.Version, namespaceName.Text.Trim()).GetAwaiter().GetResult())) namespaceName.Clear(); };
+		remove.Click += (_, _) => { if (list.SelectedItem is string selectedImport) RunMutation(() => host.RemoveImportAsync(state.Version, selectedImport).GetAwaiter().GetResult()); };
+		list.PreviewKeyDown += (_, e) => { if (e.Key == Key.Delete && list.SelectedItem is string selectedImport) { RunMutation(() => host.RemoveImportAsync(state.Version, selectedImport).GetAwaiter().GetResult()); e.Handled = true; } };
+		Refresh();
+		var bar = new StackPanel { Orientation = Orientation.Horizontal };
+		bar.Children.Add(namespaceName); bar.Children.Add(add); bar.Children.Add(remove); bar.Children.Add(error);
+		var panel = new DockPanel(); DockPanel.SetDock(bar, Dock.Top); panel.Children.Add(bar); panel.Children.Add(list);
+		new Window { Title = "Workflow Imports", Width = 560, Height = 320, Content = panel }.ShowDialog();
 	}
 
 	void ShowVariables()

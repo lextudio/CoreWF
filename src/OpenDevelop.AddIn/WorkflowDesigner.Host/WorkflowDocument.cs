@@ -312,6 +312,44 @@ sealed class WorkflowDocument
 			foreach (var item in ActivitiesWithPaths(children[index], path.Length == 0 ? index.ToString() : path + "." + index)) yield return item;
 	}
 
+	/// <summary>The namespaces this workflow's text expressions are compiled against - the
+	/// <c>Imports</c> list of the classic designer, stored as CoreWF's attached
+	/// <c>TextExpression.NamespacesForImplementation</c>. A document that declares none runs
+	/// against CoreWF's own defaults, which is what this reports for it.</summary>
+	public IReadOnlyList<string> GetImports()
+	{
+		var declared = Builder == null ? Array.Empty<string>() : System.Activities.Expressions.TextExpression.GetNamespacesForImplementation(Builder).ToArray();
+		return declared.Length > 0 ? declared : System.Activities.Expressions.TextExpression.DefaultNamespaces.ToArray();
+	}
+
+	public bool AddImport(string namespaceName)
+	{
+		var name = namespaceName.Trim();
+		if (Builder == null || name.Length == 0 || !System.Text.RegularExpressions.Regex.IsMatch(name, @"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")) return false;
+		var imports = CurrentImports();
+		if (imports.Contains(name, StringComparer.Ordinal)) return false;
+		imports.Add(name);
+		System.Activities.Expressions.TextExpression.SetNamespacesForImplementation(Builder, imports);
+		return true;
+	}
+
+	public bool RemoveImport(string namespaceName)
+	{
+		if (Builder == null) return false;
+		var imports = CurrentImports();
+		if (!imports.Remove(namespaceName)) return false;
+		System.Activities.Expressions.TextExpression.SetNamespacesForImplementation(Builder, imports);
+		return true;
+	}
+
+	/// <summary>The document's own import list, seeded from CoreWF's defaults the first time one is
+	/// edited so removing a default actually removes it rather than being masked by the fallback.</summary>
+	List<string> CurrentImports()
+	{
+		var declared = System.Activities.Expressions.TextExpression.GetNamespacesForImplementation(Builder!).ToList();
+		return declared.Count > 0 ? declared : System.Activities.Expressions.TextExpression.DefaultNamespaces.ToList();
+	}
+
 	public bool AddVariable(string name, string typeName, string defaultValue, string scopeId = "")
 	{
 		var scope = FindVariableScope(scopeId);
