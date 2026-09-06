@@ -590,9 +590,15 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 			var variables = session.Document.GetExpressionSymbolsVisibleAt(elementId)
 				.Where(variable => System.Text.RegularExpressions.Regex.IsMatch(variable.Name, "^[A-Za-z_][A-Za-z0-9_]*$"))
 				.GroupBy(variable => variable.Name, StringComparer.Ordinal).Select(group => group.First()).ToArray();
+			// Completion must see the same imports validation does, or a member access on an
+			// unqualified imported type offers nothing.
+			var imports = ResolvableImports(session);
+			var usings = visualBasic
+				? string.Concat(imports.Select(name => "Imports " + name + "\n"))
+				: string.Concat(imports.Select(name => "using " + name + "; "));
 			var before = visualBasic
-				? "Option Strict Off\nModule WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn ("
-				: "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (";
+				? "Option Strict Off\n" + usings + "Module WorkflowExpression\nFunction Value() As Object\n" + string.Join("\n", variables.Select(variable => "Dim " + variable.Name + " As " + ExpressionVariableTypeName(session, variable.TypeName) + " = Nothing")) + "\nReturn ("
+				: usings + "class WorkflowExpression { object Value() { " + string.Join(" ", variables.Select(variable => ExpressionVariableTypeName(session, variable.TypeName) + " " + variable.Name + " = default;")) + " return (";
 			var after = visualBasic ? ")\nEnd Function\nEnd Module" : "); } }";
 			using var workspace = new AdhocWorkspace(MefHostServices.DefaultHost);
 			var projectId = ProjectId.CreateNewId();
