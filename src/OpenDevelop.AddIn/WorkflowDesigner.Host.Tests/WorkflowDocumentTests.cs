@@ -106,6 +106,60 @@ public sealed class WorkflowDocumentTests
 	}
 
 	[Fact]
+	public void Property_kinds_describe_the_value_type_behind_an_activity_argument()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence { Activities = { new Delay { Duration = new InArgument<TimeSpan>(TimeSpan.Zero) }, new While { Condition = new System.Activities.Expressions.Literal<bool>(true) } } }).ToXaml() } }
+		});
+		var properties = FlattenNodes(state.Tree!).SelectMany(node => node.Properties).ToList();
+		// Duration is an InArgument<TimeSpan> and Condition an InArgument<Boolean>: the pad has to
+		// see the value type behind the wrapper, or every argument looks like a plain string.
+		Assert.Equal("TimeSpan", Assert.Single(properties.Where(property => property.Name == "Duration")).TypeName);
+		var condition = Assert.Single(properties.Where(property => property.Name == "Condition"));
+		Assert.Equal("Boolean", condition.Kind);
+		Assert.Equal("True", condition.Value);
+	}
+
+	[Fact]
+	public void An_enum_argument_offers_its_values_to_the_properties_pad()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var state = service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence { Activities = { new TryCatch() } }).ToXaml() } }
+		});
+		var properties = FlattenNodes(state.Tree!).SelectMany(node => node.Properties).ToList();
+		Assert.All(properties.Where(property => property.Kind == "Enum"), property => Assert.NotEmpty(property.AllowedValues));
+		Assert.All(properties.Where(property => property.Kind == "Number"), property => Assert.NotEqual("Enum", property.Kind));
+	}
+
+	[Fact]
+	public void The_toolbox_offers_open_generic_activities_with_their_arity()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		service.Open(new DesignerDocumentSnapshot {
+			SessionId = "session", DocumentId = "document", Version = 1,
+			Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence()).ToXaml() } }
+		});
+		var toolbox = service.GetCapabilities("session", "document").Toolbox;
+		var forEach = Assert.Single(toolbox.Where(item => item.Name == "ForEach"));
+		Assert.EndsWith("<T>", forEach.DisplayName, StringComparison.Ordinal);
+		Assert.Contains('`', forEach.TypeName);
+		Assert.DoesNotContain("ForEachInt32", toolbox.Select(item => item.Name));
+		// The structural child shapes a container owns are still offered even though they are not
+		// activity types of their own.
+		Assert.Single(toolbox.Where(item => item.Name == "SwitchCase"));
+	}
+
+	static IEnumerable<DesignerElementNode> FlattenNodes(DesignerElementNode node) =>
+		new[] { node }.Concat(node.Children.SelectMany(FlattenNodes));
+
+	[Fact]
 	public void Expression_validation_reports_csharp_and_visual_basic_syntax_errors()
 	{
 		var service = new WorkflowDesignerHostService("aa");

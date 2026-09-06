@@ -63,17 +63,29 @@ sealed class WorkflowPropertyDescriptor : PropertyDescriptor
 	public override string DisplayName => string.IsNullOrEmpty(property.DisplayName) ? property.Name : property.DisplayName;
 	public override string Description => property.Description ?? "";
 	public override bool IsReadOnly => property.IsReadOnly;
-	public override Type PropertyType => typeof(string);
+
+	/// <summary>A boolean-valued property is edited as a real <see cref="bool"/> (a checkbox in the
+	/// pad) only while it actually holds a literal. An activity argument may instead hold an
+	/// expression - "@flag", "=count &gt; 0" - which has to stay editable as text.</summary>
+	bool IsLiteralBoolean => (property.Kind == "Boolean" || string.Equals(property.TypeName, "Boolean", StringComparison.Ordinal))
+		&& bool.TryParse(property.Value, out _);
+
+	public override Type PropertyType => IsLiteralBoolean ? typeof(bool) : typeof(string);
+
+	// Enum values are offered as a list but not enforced: the same slot accepts a workflow
+	// expression producing that enum, which an exclusive standard-values list would forbid.
 	public override TypeConverter Converter => property.Kind == "Enum" && property.AllowedValues.Count != 0
 		? new WorkflowChoiceConverter(property.AllowedValues) : base.Converter;
 	public override bool CanResetValue(object component) => false;
 	public override void ResetValue(object component) { }
 	public override bool ShouldSerializeValue(object component) => true;
-	public override object? GetValue(object component) => property.Value;
+	public override object? GetValue(object component) => IsLiteralBoolean ? bool.Parse(property.Value) : property.Value;
 
 	public override void SetValue(object component, object value)
 	{
-		var serialized = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+		var serialized = value is bool flag
+			? flag ? bool.TrueString : bool.FalseString
+			: Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
 		owner.SetProperty(property.Name, serialized);
 		property.Value = serialized;
 		OnValueChanged(component, EventArgs.Empty);
@@ -85,6 +97,6 @@ sealed class WorkflowChoiceConverter : StringConverter
 	readonly StandardValuesCollection values;
 	public WorkflowChoiceConverter(System.Collections.Generic.IEnumerable<string> values) => this.values = new StandardValuesCollection(values.ToArray());
 	public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
-	public override bool GetStandardValuesExclusive(ITypeDescriptorContext? context) => true;
+	public override bool GetStandardValuesExclusive(ITypeDescriptorContext? context) => false;
 	public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context) => values;
 }

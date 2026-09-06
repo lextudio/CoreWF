@@ -1243,7 +1243,10 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		// throws AmbiguousMatchException for them, so select the same public instance surface
 		// the document projection uses instead of asking reflection for a unique match.
 		var property = FindDesignProperty(activity, name);
-		var type = property?.PropertyType;
+		// The pad edits the *value* of a property, so a property held as InArgument<T> or
+		// Activity<T> must be described by its T: otherwise an enum argument looks like a plain
+		// string and loses its list of values, which is most of CoreWF's enum surface.
+		var type = EffectiveValueType(property?.PropertyType);
 		var isEnum = type?.IsEnum == true;
 		return new DesignerPropertyInfo {
 			Name = name,
@@ -1252,10 +1255,36 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 			Value = value, TypeName = typeName,
 			IsReadOnly = isReadOnly || property?.GetCustomAttribute<System.ComponentModel.ReadOnlyAttribute>()?.IsReadOnly == true,
 			Category = property?.GetCustomAttribute<System.ComponentModel.CategoryAttribute>()?.Category ?? "Workflow",
-			Kind = isEnum ? "Enum" : "String",
+			Kind = PropertyKind(type),
 			AllowedValues = isEnum ? Enum.GetNames(type!).ToList() : new List<string>()
 		};
 	}
+
+	/// <summary>Unwraps the argument/expression wrappers CoreWF holds designable values in, so the
+	/// property pad sees the type the user actually edits.</summary>
+	static Type? EffectiveValueType(Type? propertyType)
+	{
+		for (var type = propertyType; type != null; type = type.BaseType) {
+			if (!type.IsGenericType) continue;
+			var definition = type.GetGenericTypeDefinition();
+			if (definition == typeof(InArgument<>) || definition == typeof(OutArgument<>) || definition == typeof(InOutArgument<>) || definition == typeof(Activity<>))
+				return Nullable.GetUnderlyingType(type.GetGenericArguments()[0]) ?? type.GetGenericArguments()[0];
+		}
+		return propertyType == null ? null : Nullable.GetUnderlyingType(propertyType) ?? propertyType;
+	}
+
+	static string PropertyKind(Type? type) =>
+		type == null ? "String"
+		: type.IsEnum ? "Enum"
+		: type == typeof(bool) ? "Boolean"
+		: type == typeof(Uri) ? "Uri"
+		: IsNumericType(type) ? "Number"
+		: "String";
+
+	static bool IsNumericType(Type type) =>
+		type == typeof(byte) || type == typeof(sbyte) || type == typeof(short) || type == typeof(ushort)
+		|| type == typeof(int) || type == typeof(uint) || type == typeof(long) || type == typeof(ulong)
+		|| type == typeof(float) || type == typeof(double) || type == typeof(decimal);
 
 	static bool IsBrowsableProperty(Activity activity, string name) => FindDesignProperty(activity, name)?.GetCustomAttribute<System.ComponentModel.BrowsableAttribute>()?.Browsable != false;
 
