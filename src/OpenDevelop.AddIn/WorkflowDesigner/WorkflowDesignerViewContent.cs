@@ -1144,13 +1144,21 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			return;
 		}
 		var propertiesList = new ComboBox { Margin = new Thickness(8), ItemsSource = editable, DisplayMemberPath = nameof(DesignerPropertyInfo.DisplayName), SelectedIndex = 0 };
-		var editor = new TextBox { Margin = new Thickness(8), AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MinHeight = 110 };
+		// A real code editor rather than a TextBox: a workflow expression is C# (or VB) source, and
+		// gets the same highlighting and completion-window behavior it would have in a code file.
+		var editor = new ICSharpCode.AvalonEdit.TextEditor {
+			Margin = new Thickness(8), MinHeight = 110, FontFamily = new FontFamily("Menlo, Consolas, monospace"),
+			ShowLineNumbers = false, WordWrap = true,
+			SyntaxHighlighting = ICSharpCode.AvalonEdit.Highlighting.HighlightingManager.Instance.GetDefinition("C#")
+		};
+		editor.Options.EnableEmailHyperlinks = false;
+		editor.Options.EnableHyperlinks = false;
 		var targetStates = new ComboBox { Margin = new Thickness(8), DisplayMemberPath = nameof(DesignerElementNode.Name), SelectedValuePath = nameof(DesignerElementNode.Id), Visibility = Visibility.Collapsed, ToolTip = "Target State" };
 		var transitionMarker = selected.Id.LastIndexOf(".$transition-", StringComparison.Ordinal);
 		var stateMarker = transitionMarker < 0 ? -1 : selected.Id.LastIndexOf("$state-", transitionMarker, StringComparison.Ordinal);
 		var stateMachinePrefix = stateMarker < 0 ? "\0" : selected.Id[..stateMarker];
 		targetStates.ItemsSource = state.Tree == null ? Array.Empty<DesignerElementNode>() : Flatten(state.Tree).Where(node => node.Type == "State" && node.Id.StartsWith(stateMachinePrefix, StringComparison.Ordinal) && node.Id.IndexOf("$state-", stateMachinePrefix.Length, StringComparison.Ordinal) == stateMachinePrefix.Length).ToArray();
-		var suggestions = new ComboBox { Margin = new Thickness(8, 0, 8, 4), Visibility = Visibility.Collapsed, ToolTip = "Select a symbol to insert" };
+		ICSharpCode.AvalonEdit.CodeCompletion.CompletionWindow? completionWindow = null;
 		void LoadValue() { if (propertiesList.SelectedItem is DesignerPropertyInfo property) { editor.Text = property.Value; var isTarget = property.Name == "$target"; editor.Visibility = isTarget ? Visibility.Collapsed : Visibility.Visible; targetStates.Visibility = isTarget ? Visibility.Visible : Visibility.Collapsed; targetStates.SelectedValue = property.Value; } }
 		propertiesList.SelectionChanged += (_, _) => LoadValue();
 		LoadValue();
@@ -1162,7 +1170,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		var cancel = new Button { Content = "Cancel", Margin = new Thickness(8), MinWidth = 75 };
 		var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
 		buttons.Children.Add(cancel); buttons.Children.Add(complete); buttons.Children.Add(validate); buttons.Children.Add(save);
-		var panel = new DockPanel(); DockPanel.SetDock(propertiesList, Dock.Top); DockPanel.SetDock(targetStates, Dock.Top); DockPanel.SetDock(suggestions, Dock.Top); DockPanel.SetDock(hint, Dock.Bottom); DockPanel.SetDock(validation, Dock.Bottom); DockPanel.SetDock(buttons, Dock.Bottom); panel.Children.Add(propertiesList); panel.Children.Add(targetStates); panel.Children.Add(suggestions); panel.Children.Add(hint); panel.Children.Add(validation); panel.Children.Add(buttons); panel.Children.Add(editor);
+		var panel = new DockPanel(); DockPanel.SetDock(propertiesList, Dock.Top); DockPanel.SetDock(targetStates, Dock.Top); DockPanel.SetDock(hint, Dock.Bottom); DockPanel.SetDock(validation, Dock.Bottom); DockPanel.SetDock(buttons, Dock.Bottom); panel.Children.Add(propertiesList); panel.Children.Add(targetStates); panel.Children.Add(hint); panel.Children.Add(validation); panel.Children.Add(buttons); panel.Children.Add(editor);
 		var window = new Window { Title = "Workflow Expression", Width = 520, Height = 280, Content = panel, Owner = Window.GetWindow(UserContent as DependencyObject) };
 		cancel.Click += (_, _) => window.Close();
 		async Task ValidateExpressionAsync()
@@ -1186,16 +1194,19 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		async Task CompleteAtCaret()
 		{
 			if (host == null) return;
-			var caret = editor.CaretIndex;
+			var caret = editor.CaretOffset;
 			var start = caret;
 			while (start > 0 && (char.IsLetterOrDigit(editor.Text[start - 1]) || editor.Text[start - 1] == '_')) start--;
 			var prefix = editor.Text[start..caret];
 			try {
 				var result = await host.CompleteExpressionAsync(editor.Text, prefix, selected.Id);
-				suggestions.ItemsSource = result.Items;
-				suggestions.Visibility = result.Items.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-				suggestions.Tag = new Tuple<int, int>(start, caret - start);
-				if (result.Items.Count > 0) suggestions.IsDropDownOpen = true;
+				completionWindow?.Close();
+				if (result.Items.Count == 0) { validation.Foreground = Brushes.DimGray; validation.Text = "No completions here."; return; }
+				var window = new ICSharpCode.AvalonEdit.CodeCompletion.CompletionWindow(editor.TextArea) { StartOffset = start, EndOffset = caret };
+				foreach (var item in result.Items) window.CompletionList.CompletionData.Add(new WorkflowCompletionData(item));
+				window.Closed += (_, _) => completionWindow = null;
+				completionWindow = window;
+				window.Show();
 			} catch (Exception exception) { validation.Foreground = Brushes.OrangeRed; validation.Text = "Completion failed: " + exception.Message; }
 		}
 		validate.Click += async (_, _) => await ValidateExpressionAsync();
@@ -1203,12 +1214,10 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		editor.PreviewKeyDown += async (_, e) => {
 			if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control) && e.Key == Key.Space) { await CompleteAtCaret(); e.Handled = true; }
 		};
-		suggestions.SelectionChanged += (_, _) => {
-			if (suggestions.SelectedItem is not string item || suggestions.Tag is not Tuple<int, int> range) return;
-			editor.Text = editor.Text.Remove(range.Item1, range.Item2).Insert(range.Item1, item);
-			editor.CaretIndex = range.Item1 + item.Length;
-			suggestions.Visibility = Visibility.Collapsed;
-		};
+		// Member access is where completion earns its keep, so offer it without waiting for the
+		// explicit Ctrl+Space the previous editor required.
+		editor.TextArea.TextEntered += async (_, e) => { if (e.Text == ".") await CompleteAtCaret(); };
+		window.Closed += (_, _) => completionWindow?.Close();
 		save.Click += (_, _) => {
 			if (propertiesList.SelectedItem is DesignerPropertyInfo property && SetProperty(selected.Id, property.Name, property.Name == "$target" ? targetStates.SelectedValue as string ?? "" : editor.Text)) window.Close();
 		};
