@@ -73,6 +73,21 @@ public static class WorkflowDesignerDevFlowActions
 		return JsonSerializer.Serialize(new { success, elementCount = view?.ElementCount ?? 0, selectedElementId = view?.SelectedElementId });
 	}
 
+	[DevFlowAction("od.workflow-designer.move-into", Description = "Move a CoreWF activity subtree into another container, as dragging its box does")]
+	public static string MoveInto(string elementId, string targetParentId)
+	{
+		var view = Activate();
+		var success = view?.MoveElementInto(elementId, targetParentId) == true;
+		return JsonSerializer.Serialize(new { success, elementCount = view?.ElementCount ?? 0, selectedElementId = view?.SelectedElementId });
+	}
+
+	[DevFlowAction("od.workflow-designer.imports", Description = "Read the namespaces the active CoreWF workflow imports")]
+	public static string Imports()
+	{
+		var view = Activate();
+		return JsonSerializer.Serialize(new { imports = view?.ImportedNamespaces ?? Array.Empty<string>() });
+	}
+
 	[DevFlowAction("od.workflow-designer.set-property", Description = "Set a property on the selected CoreWF activity")]
 	public static string SetProperty(string name, string value)
 	{

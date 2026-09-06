@@ -217,6 +217,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		surface.AllowDrop = true;
 		surface.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(typeof(DesignerToolboxItemInfo)) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
 		surface.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) AddToolboxItem(item); e.Handled = true; };
+
 		canvas.ContentHost.Content = scroller;
 	}
 
@@ -484,6 +485,50 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 			return false;
 		}
 	}
+
+	const string WorkflowElementDragFormat = "WorkflowDesigner.ElementId";
+
+	/// <summary>A node drawn inside a Flowchart or StateMachine graph, whose drag gesture already
+	/// means "position this node" rather than "move it elsewhere".</summary>
+	bool IsGraphChild(DesignerElementNode node)
+	{
+		if (state.Tree == null) return false;
+		var parent = Flatten(state.Tree).FirstOrDefault(candidate => candidate.Children.Any(child => child.Id == node.Id));
+		return parent?.Type is "Flowchart" or "StateMachine";
+	}
+
+	/// <summary>Whether a drag of <paramref name="sourceId"/> onto <paramref name="targetId"/> is a
+	/// move the designer can make: a container cannot be moved into itself or into its own subtree,
+	/// and only a container can receive one.</summary>
+	bool CanMoveInto(string? sourceId, string targetId)
+	{
+		if (string.IsNullOrEmpty(sourceId) || sourceId == targetId || state.Tree == null) return false;
+		if (targetId.StartsWith(sourceId + ".", StringComparison.Ordinal)) return false;
+		var target = Find(state.Tree, targetId);
+		return target != null && IsContainer(target.Type);
+	}
+
+	/// <summary>Moves an activity subtree into another container. This goes through the host's
+	/// cut/paste, which round-trips the subtree as XAML, so the moved activity keeps its
+	/// properties, variables and children instead of being rebuilt from its type name.</summary>
+	bool MoveInto(string sourceId, string targetId)
+	{
+		if (host == null || !CanMoveInto(sourceId, targetId)) return false;
+		try {
+			Mutate(() => host.CutElementsAsync(state.Version, new[] { sourceId }).GetAwaiter().GetResult());
+			Mutate(() => host.PasteElementsAsync(state.Version, targetId).GetAwaiter().GetResult());
+			if (state.CreatedElementId is { } id && selection.Find(id) is { } moved) selection.Select(moved);
+			return true;
+		} catch (Exception exception) {
+			diagnostic.Text = "Cannot move the activity there: " + exception.Message;
+			return false;
+		}
+	}
+
+	/// <summary>Test/automation entry point for the drag-to-move gesture.</summary>
+	public bool MoveElementInto(string elementId, string targetParentId) => MoveInto(elementId, targetParentId);
+
+	public string[] ImportedNamespaces => host == null ? Array.Empty<string>() : host.GetImportsAsync().GetAwaiter().GetResult().ToArray();
 
 	bool MoveSelected(int offset)
 	{
@@ -1346,8 +1391,35 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		// unreadable text" this canvas used to show. Pin once on the box; descendants inherit.
 		TextElement.SetForeground(border, ActivityInk);
 		border.AllowDrop = true;
-		border.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(typeof(DesignerToolboxItemInfo)) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
-		border.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) AddToolboxItem(item, node.Id); e.Handled = true; };
+		border.DragOver += (_, e) => {
+			e.Effects = e.Data.GetDataPresent(typeof(DesignerToolboxItemInfo)) ? DragDropEffects.Copy
+				: CanMoveInto(e.Data.GetData(WorkflowElementDragFormat) as string, node.Id) ? DragDropEffects.Move
+				: DragDropEffects.None;
+			e.Handled = true;
+		};
+		border.Drop += (_, e) => {
+			if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) AddToolboxItem(item, node.Id);
+			else if (e.Data.GetData(WorkflowElementDragFormat) is string movedId) MoveInto(movedId, node.Id);
+			e.Handled = true;
+		};
+		// Dragging an activity box onto another container moves the whole subtree there. Flowchart
+		// and StateMachine children own their drag gesture already (it positions the node on the
+		// graph), so this applies to the ordinary nested-box surface only.
+		if (node.Id.Length > 0 && !IsGraphChild(node)) {
+			var pressedAt = (Point?)null;
+			border.PreviewMouseLeftButtonDown += (_, e) => pressedAt = e.GetPosition(surface);
+			border.PreviewMouseLeftButtonUp += (_, _) => pressedAt = null;
+			// MouseMove bubbles, so the innermost box under the cursor claims the gesture; the
+			// system drag threshold keeps a plain click on a box from becoming a move.
+			border.MouseMove += (_, e) => {
+				if (e.LeftButton != MouseButtonState.Pressed || pendingFlowSourceId != null || pressedAt == null) return;
+				var moved = e.GetPosition(surface) - pressedAt.Value;
+				if (Math.Abs(moved.X) < SystemParameters.MinimumHorizontalDragDistance && Math.Abs(moved.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+				pressedAt = null;
+				e.Handled = true;
+				DragDrop.DoDragDrop(border, new DataObject(WorkflowElementDragFormat, node.Id), DragDropEffects.Move);
+			};
+		}
 		border.MouseLeftButtonDown += (_, e) => {
 			if (pendingFlowSourceId != null && node.Id != pendingFlowSourceId) {
 				ConnectArmedFlowTarget(node.Id);
