@@ -70,7 +70,7 @@ public static class WorkflowDesignerDevFlowActions
 	{
 		var view = Activate();
 		var success = view?.Add(typeName) == true;
-		return JsonSerializer.Serialize(new { success, elementCount = view?.ElementCount ?? 0, selectedElementId = view?.SelectedElementId });
+		return JsonSerializer.Serialize(new { success, elementCount = view?.ElementCount ?? 0, selectedElementId = view?.SelectedElementId, diagnostic = view?.Diagnostic });
 	}
 
 	[DevFlowAction("od.workflow-designer.move-into", Description = "Move a CoreWF activity subtree into another container, as dragging its box does")]
@@ -78,7 +78,7 @@ public static class WorkflowDesignerDevFlowActions
 	{
 		var view = Activate();
 		var success = view?.MoveElementInto(elementId, targetParentId) == true;
-		return JsonSerializer.Serialize(new { success, elementCount = view?.ElementCount ?? 0, selectedElementId = view?.SelectedElementId });
+		return JsonSerializer.Serialize(new { success, elementCount = view?.ElementCount ?? 0, selectedElementId = view?.SelectedElementId, diagnostic = view?.Diagnostic });
 	}
 
 	[DevFlowAction("od.workflow-designer.imports", Description = "Read the namespaces the active CoreWF workflow imports")]

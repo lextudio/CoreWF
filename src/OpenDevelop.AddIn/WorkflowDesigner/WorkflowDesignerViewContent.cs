@@ -245,6 +245,9 @@ public sealed partial class WorkflowDesignerViewContent : AbstractViewContentHan
 	public object ToolsContent => toolboxPane;
 	public PropertyContainer PropertyContainer => properties;
 	public string Status => state.Accepted ? $"Ready: {ElementCount} activities (host {host?.ProcessId})" : state.Error;
+	/// <summary>The designer's status line. An edit that the host refuses reports why only here, so
+	/// integration tests need it to explain a failed action rather than just seeing "success:false".</summary>
+	public string Diagnostic => diagnostic.Text ?? "";
 	public int ElementCount => state.Tree == null ? 0 : Flatten(state.Tree).Count();
 	public int HostProcessId => host?.ProcessId ?? 0;
 	public int ToolboxItemCount => toolboxModel.AllItems.Count;
@@ -1035,7 +1038,17 @@ public sealed partial class WorkflowDesignerViewContent : AbstractViewContentHan
 	/// friends) - the ones whose empty body should show VS's "Drop activity here" hint text
 	/// rather than rendering as blank (how-to-add-activities-to-the-toolbox.md's toolbox
 	/// convention). Leaf activities (WriteLine, Delay, ...) never show it.</summary>
-	static bool IsContainer(string type) => type is "Sequence" or "Parallel" or "While" or "DoWhile" or "If" or "TryCatch" or "Flowchart" or "StateMachine" or "State" or "Transition";
+	static bool IsContainer(string type)
+	{
+		// A closed generic activity reports its CLR name, arity included (ForEach`1).
+		var tick = type.IndexOf('`');
+		var bare = tick < 0 ? type : type[..tick];
+		return bare is "Sequence" or "Parallel" or "While" or "DoWhile" or "If" or "TryCatch" or "Flowchart" or "StateMachine" or "State" or "Transition"
+			// The body/branch shapes a container owns are the drop targets, not the owner: an
+			// activity goes into a loop's Body or a switch's Case node, which the owner's box
+			// renders as a child box of its own.
+			or "ForEachBody" or "ParallelForEachBody" or "SwitchCase" or "SwitchDefault" or "PickBranch" or "Catch";
+	}
 
 	Border Box(DesignerElementNode node)
 	{

@@ -937,6 +937,16 @@ public sealed class WorkflowDocumentTests
 	}
 
 	[Fact]
+	public void A_generic_toolbox_item_resolves_from_a_partially_qualified_type_name()
+	{
+		// A partial assembly-qualified name (no version/culture) is not bindable by Type.GetType on
+		// .NET Core, so the resolver has to fall back to the simple name.
+		var document = Load(new Sequence());
+		Assert.Equal("0", document.AddChild("", "System.Activities.Statements.ForEach`1, System.Activities|System.String"));
+		Assert.IsType<ForEach<string>>(document.Find("0"));
+	}
+
+	[Fact]
 	public void A_generic_toolbox_item_dropped_without_a_type_argument_falls_back_to_Object()
 	{
 		var document = Load(new Sequence());

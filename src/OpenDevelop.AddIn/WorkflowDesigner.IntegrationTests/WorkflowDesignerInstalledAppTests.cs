@@ -127,6 +127,35 @@ public sealed class WorkflowDesignerInstalledAppTests
 			Assert.True(undo.GetProperty("success").GetBoolean(), undo.ToString());
 			var redo = await app.InvokeAsync("od.workflow-designer.redo");
 			Assert.True(redo.GetProperty("success").GetBoolean(), redo.ToString());
+
+			// A generic activity carries its type argument in the toolbox item's type name, the
+			// same form the type-argument prompt produces when one is dropped.
+			var rootSelected = await app.InvokeAsync("od.workflow-designer.select", "");
+			Assert.True(rootSelected.GetProperty("success").GetBoolean(), rootSelected.ToString());
+			var beforeGeneric = (await app.InvokeAsync("od.workflow-designer.status")).GetProperty("elementCount").GetInt32();
+			var genericInsert = await app.InvokeAsync("od.workflow-designer.toolbox.insert",
+				"System.Activities.Statements.ForEach`1, System.Activities|System.String");
+			Assert.True(genericInsert.GetProperty("success").GetBoolean(), genericInsert.ToString());
+			Assert.True(genericInsert.GetProperty("elementCount").GetInt32() > beforeGeneric, genericInsert.ToString());
+			var genericId = genericInsert.GetProperty("selectedElementId").GetString();
+			Assert.False(string.IsNullOrEmpty(genericId), genericInsert.ToString());
+			var genericStatus = await app.InvokeAsync("od.workflow-designer.status");
+			Assert.Equal("ForEach`1", genericStatus.GetProperty("selectedElementType").GetString());
+
+			// The workflow must still validate: a dropped generic loop is seeded with an empty
+			// sequence of its own element type rather than a null required argument.
+			var genericValidation = await app.InvokeAsync("od.workflow-designer.validate");
+			Assert.True(genericValidation.GetProperty("isValid").GetBoolean(), genericValidation.ToString());
+
+			// Moving an activity into another container keeps the subtree, so the element count
+			// does not change.
+			var movedInto = await app.InvokeAsync("od.workflow-designer.move-into", "0", genericId + ".$foreach-body");
+			Assert.True(movedInto.GetProperty("success").GetBoolean(), movedInto.ToString());
+			var refusedMove = await app.InvokeAsync("od.workflow-designer.move-into", genericId!, genericId!);
+			Assert.False(refusedMove.GetProperty("success").GetBoolean(), refusedMove.ToString());
+
+			var imports = await app.InvokeAsync("od.workflow-designer.imports");
+			Assert.Contains("System", imports.GetProperty("imports").EnumerateArray().Select(entry => entry.GetString()));
 		}
 		finally
 		{
