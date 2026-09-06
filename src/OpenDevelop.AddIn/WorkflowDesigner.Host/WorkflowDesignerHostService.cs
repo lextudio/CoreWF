@@ -68,7 +68,10 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	{
 		return new DesignerCapabilities {
 			Runtime = "CoreWF ActivityBuilder", Version = typeof(Activity).Assembly.GetName().Version?.ToString() ?? "", SessionId = sessionId,
-			Toolbox = StandardActivities().Append(new DesignerToolboxItemInfo { Name = "State", DisplayName = "State", TypeName = "State", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "Transition", DisplayName = "Transition", TypeName = "Transition", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "FlowDecision", DisplayName = "Flow Decision", TypeName = "FlowDecision", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "Catch", DisplayName = "Catch (Exception)", TypeName = "Catch", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "PickBranch", DisplayName = "Pick Branch", TypeName = "PickBranch", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "ForEachInt32", DisplayName = "For Each (Int32)", TypeName = "ForEachInt32", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "ParallelForEachInt32", DisplayName = "Parallel For Each (Int32)", TypeName = "ParallelForEachInt32", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "SwitchInt32", DisplayName = "Switch (Int32)", TypeName = "SwitchInt32", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "SwitchCase", DisplayName = "Switch Case", TypeName = "SwitchCase", Category = "CoreWF" }).Append(new DesignerToolboxItemInfo { Name = "SwitchDefault", DisplayName = "Switch Default", TypeName = "SwitchDefault", Category = "CoreWF" }).Concat(string.Equals(snapshot.ProjectCodeMode, "Enabled", StringComparison.OrdinalIgnoreCase) ? ProjectActivities(snapshot) : Enumerable.Empty<DesignerToolboxItemInfo>()).OrderBy(item => item.Category, StringComparer.Ordinal).ThenBy(item => item.DisplayName, StringComparer.Ordinal)
+			Toolbox = StandardActivities()
+				.Concat(VirtualToolboxItems())
+				.Concat(string.Equals(snapshot.ProjectCodeMode, "Enabled", StringComparison.OrdinalIgnoreCase) ? ProjectActivities(snapshot) : Enumerable.Empty<DesignerToolboxItemInfo>())
+				.OrderBy(item => item.Category, StringComparer.Ordinal).ThenBy(item => item.DisplayName, StringComparer.Ordinal)
 				.ToList()
 		};
 	}
@@ -76,6 +79,16 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	static IEnumerable<DesignerToolboxItemInfo> StandardActivities() => ActivityTypes(typeof(Sequence).Assembly)
 		.Where(type => type.Namespace == typeof(Sequence).Namespace)
 		.Select(type => ToolboxItem(type, "CoreWF"));
+
+	/// <summary>Toolbox entries that are not CLR activity types of their own: the structural child
+	/// shapes a container owns (a State, a Catch, a Switch case) which the designer creates through
+	/// its parent rather than by constructing a type.</summary>
+	static IEnumerable<DesignerToolboxItemInfo> VirtualToolboxItems() =>
+		new[] {
+			("State", "State"), ("Transition", "Transition"), ("FlowDecision", "Flow Decision"),
+			("Catch", "Catch (Exception)"), ("PickBranch", "Pick Branch"),
+			("SwitchCase", "Switch Case"), ("SwitchDefault", "Switch Default")
+		}.Select(entry => new DesignerToolboxItemInfo { Name = entry.Item1, DisplayName = entry.Item2, TypeName = entry.Item1, Category = "CoreWF" });
 
 	static IEnumerable<DesignerToolboxItemInfo> ProjectActivities(DesignerDocumentSnapshot snapshot)
 	{
@@ -93,7 +106,13 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	{
 		IEnumerable<Type> types;
 		try { types = assembly.GetTypes(); } catch (ReflectionTypeLoadException exception) { types = exception.Types.Where(type => type != null)!; }
-		return types.Where(type => !type.IsAbstract && !type.ContainsGenericParameters && typeof(Activity).IsAssignableFrom(type) && type.GetConstructor(Type.EmptyTypes) != null);
+		// A single-parameter generic activity (ForEach<T>, Switch<T>, ...) belongs in the toolbox as
+		// an open definition: the designer asks for the type argument when it is dropped. Wider
+		// generic shapes have no such prompt and stay out.
+		return types.Where(type => !type.IsAbstract && typeof(Activity).IsAssignableFrom(type)
+			&& (type.IsGenericTypeDefinition
+				? type.GetGenericArguments().Length == 1
+				: !type.ContainsGenericParameters && type.GetConstructor(Type.EmptyTypes) != null));
 	}
 
 	static DesignerToolboxItemInfo ToolboxItem(Type type, string category)
@@ -104,9 +123,14 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var displayName = type.GetCustomAttribute<System.ComponentModel.DisplayNameAttribute>()?.DisplayName;
 		var declaredCategory = type.GetCustomAttribute<System.ComponentModel.CategoryAttribute>()?.Category;
 		var description = type.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description;
+		var isOpenGeneric = type.IsGenericTypeDefinition;
+		var bareName = isOpenGeneric && type.Name.IndexOf('`') is var tick and >= 0 ? type.Name[..tick] : type.Name;
+		var readableName = string.IsNullOrWhiteSpace(displayName) ? HumanizeTypeName(bareName) : displayName;
 		return new DesignerToolboxItemInfo {
-			Name = type.Name,
-			DisplayName = string.IsNullOrWhiteSpace(displayName) ? HumanizeTypeName(type.Name) : displayName,
+			Name = bareName,
+			// The trailing <T> is the designer's signal - and the user's - that dropping this item
+			// asks for a type argument first.
+			DisplayName = isOpenGeneric ? readableName + " <T>" : readableName,
 			TypeName = type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
 			Category = string.IsNullOrWhiteSpace(declaredCategory) ? category : declaredCategory,
 			Template = description ?? "",
@@ -717,16 +741,14 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	{
 		result[activity.Id] = path;
 		var children = InspectChildren(activity);
-		if (activity is Switch<int> @switchForChildren)
-			children = children.Where(child => !@switchForChildren.Cases.Values.Any(branch => ReferenceEquals(branch, child)) && !ReferenceEquals(@switchForChildren.Default, child)).ToArray();
+		if (GenericActivityShapes.SwitchShape.For(activity) is { } switchForChildren)
+			children = children.Where(child => !switchForChildren.Branches.Any(branch => ReferenceEquals(branch, child)) && !ReferenceEquals(switchForChildren.Default, child)).ToArray();
 		if (activity is TryCatch tryCatchForChildren)
 			children = children.Where(child => !tryCatchForChildren.Catches.Any(@catch => ReferenceEquals((@catch.GetType().GetProperty("Action")?.GetValue(@catch) as ActivityDelegate)?.Handler, child))).ToArray();
 		if (activity is Pick pickForChildren)
 			children = children.Where(child => !pickForChildren.Branches.Any(branch => ReferenceEquals(branch.Trigger, child) || ReferenceEquals(branch.Action, child))).ToArray();
-		if (activity is ForEach<int> forEachForChildren)
-			children = children.Where(child => !ReferenceEquals(forEachForChildren.Body?.Handler, child) && !ReferenceEquals(forEachForChildren.Values?.Expression, child)).ToArray();
-		if (activity is ParallelForEach<int> parallelForEachForChildren)
-			children = children.Where(child => !ReferenceEquals(parallelForEachForChildren.Body?.Handler, child) && !ReferenceEquals(parallelForEachForChildren.Values?.Expression, child)).ToArray();
+		if (GenericActivityShapes.ForEachShape.For(activity) is { } loopForChildren)
+			children = children.Where(child => !ReferenceEquals(loopForChildren.Handler, child) && !ReferenceEquals(loopForChildren.ValuesExpression, child)).ToArray();
 		// StateMachine inspection exposes implementation activities from State/Transition as if
 		// they were direct children. They belong exclusively to the virtual State nodes below;
 		// rendering them here duplicates the tree and gives them unstable ordinary paths.
@@ -747,9 +769,12 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 				}
 			}
 		}
-		if (activity is Switch<int> switchForRuntimeIds) {
-			foreach (var entry in switchForRuntimeIds.Cases)
-				if (entry.Value != null) AddRuntimeIds(entry.Value, (path.Length == 0 ? "" : path + ".") + "$case-" + entry.Key + ".0", result);
+		if (GenericActivityShapes.SwitchShape.For(activity) is { } switchForRuntimeIds) {
+			// Case element ids are ordinal, so this must walk the cases in the same enumeration
+			// order the tree projection uses.
+			var caseKeys = switchForRuntimeIds.Keys;
+			for (var index = 0; index < caseKeys.Count; index++)
+				if (switchForRuntimeIds.ActivityAt(index) is { } branch) AddRuntimeIds(branch, (path.Length == 0 ? "" : path + ".") + "$case-" + index + ".0", result);
 			if (switchForRuntimeIds.Default != null) AddRuntimeIds(switchForRuntimeIds.Default, (path.Length == 0 ? "" : path + ".") + "$default.0", result);
 		}
 		if (activity is TryCatch tryCatchForRuntimeIds)
@@ -762,10 +787,8 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 				if (pickForRuntimeIds.Branches[index].Trigger != null) AddRuntimeIds(pickForRuntimeIds.Branches[index].Trigger!, branchPath + ".0", result);
 				if (pickForRuntimeIds.Branches[index].Action != null) AddRuntimeIds(pickForRuntimeIds.Branches[index].Action!, branchPath + ".1", result);
 			}
-		if (activity is ForEach<int> forEachForRuntimeIds && forEachForRuntimeIds.Body?.Handler != null)
-			AddRuntimeIds(forEachForRuntimeIds.Body.Handler, (path.Length == 0 ? "" : path + ".") + "$foreach-body.0", result);
-		if (activity is ParallelForEach<int> parallelForEachForRuntimeIds && parallelForEachForRuntimeIds.Body?.Handler != null)
-			AddRuntimeIds(parallelForEachForRuntimeIds.Body.Handler, (path.Length == 0 ? "" : path + ".") + "$parallelforeach-body.0", result);
+		if (GenericActivityShapes.ForEachShape.For(activity) is { Handler: { } loopHandler } loopForRuntimeIds)
+			AddRuntimeIds(loopHandler, (path.Length == 0 ? "" : path + ".") + (loopForRuntimeIds.IsParallel ? "$parallelforeach-body.0" : "$foreach-body.0"), result);
 	}
 
 	[JsonRpcMethod("workflow/cancel-run")]
@@ -1066,10 +1089,8 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var children = InspectChildren(activity);
 		if (activity is Pick pickForChildren)
 			children = children.Where(child => !pickForChildren.Branches.Any(branch => ReferenceEquals(branch.Trigger, child) || ReferenceEquals(branch.Action, child))).ToArray();
-		if (activity is ForEach<int> forEachForChildren)
-			children = children.Where(child => !ReferenceEquals(forEachForChildren.Body?.Handler, child) && !ReferenceEquals(forEachForChildren.Values?.Expression, child)).ToArray();
-		if (activity is ParallelForEach<int> parallelForEachForChildren)
-			children = children.Where(child => !ReferenceEquals(parallelForEachForChildren.Body?.Handler, child) && !ReferenceEquals(parallelForEachForChildren.Values?.Expression, child)).ToArray();
+		if (GenericActivityShapes.ForEachShape.For(activity) is { } loopForChildren)
+			children = children.Where(child => !ReferenceEquals(loopForChildren.Handler, child) && !ReferenceEquals(loopForChildren.ValuesExpression, child)).ToArray();
 		if (activity is StateMachine) children = Array.Empty<Activity>();
 		var properties = document.GetProperties(activity)
 			.Where(p => IsBrowsableProperty(activity, p.Name))
@@ -1175,21 +1196,33 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 				});
 			}
 		}
-		if (activity is ForEach<int> forEach) {
-			var id = (path.Length == 0 ? "" : path + ".") + "$foreach-body";
-			childNodes.Add(new DesignerElementNode { Id = id, Path = path, Name = "Body", Type = "ForEachBody", Properties = new List<DesignerPropertyInfo> { new() { Name = "$itemName", DisplayName = "Item name", Value = forEach.Body?.Argument?.Name ?? "item", TypeName = "String", IsReadOnly = false, Category = "For Each" } }, Children = forEach.Body?.Handler == null ? new List<DesignerElementNode>() : new List<DesignerElementNode> { Node(document, forEach.Body.Handler, id + ".0") } });
+		if (GenericActivityShapes.ForEachShape.For(activity) is { } loop) {
+			var marker = loop.IsParallel ? "$parallelforeach-body" : "$foreach-body";
+			var id = (path.Length == 0 ? "" : path + ".") + marker;
+			var category = loop.IsParallel ? "Parallel For Each" : "For Each";
+			childNodes.Add(new DesignerElementNode {
+				Id = id, Path = path, Name = "Body", Type = loop.IsParallel ? "ParallelForEachBody" : "ForEachBody",
+				Properties = new List<DesignerPropertyInfo> {
+					new() { Name = "$itemName", DisplayName = "Item name", Value = loop.Argument?.Name ?? "item", TypeName = "String", IsReadOnly = false, Category = category },
+					new() { Name = "$itemType", DisplayName = "Item type", Value = loop.ItemType.Name, TypeName = "Type", IsReadOnly = true, Category = category }
+				},
+				Children = loop.Handler == null ? new List<DesignerElementNode>() : new List<DesignerElementNode> { Node(document, loop.Handler, id + ".0") }
+			});
 		}
-		if (activity is ParallelForEach<int> parallelForEach) {
-			var id = (path.Length == 0 ? "" : path + ".") + "$parallelforeach-body";
-			childNodes.Add(new DesignerElementNode { Id = id, Path = path, Name = "Body", Type = "ParallelForEachBody", Properties = new List<DesignerPropertyInfo> { new() { Name = "$itemName", DisplayName = "Item name", Value = parallelForEach.Body?.Argument?.Name ?? "item", TypeName = "String", IsReadOnly = false, Category = "Parallel For Each" } }, Children = parallelForEach.Body?.Handler == null ? new List<DesignerElementNode>() : new List<DesignerElementNode> { Node(document, parallelForEach.Body.Handler, id + ".0") } });
-		}
-		if (activity is Switch<int> @switch) {
-			foreach (var entry in @switch.Cases.OrderBy(entry => entry.Key)) {
-				var id = (path.Length == 0 ? "" : path + ".") + "$case-" + entry.Key;
+		if (GenericActivityShapes.SwitchShape.For(activity) is { } @switch) {
+			// Cases are addressed by their ordinal position (a key of an arbitrary T cannot be put
+			// into a dotted element id), so the enumeration order here defines those ids and must
+			// match the runtime-id walk.
+			var caseKeys = @switch.Keys;
+			for (var index = 0; index < caseKeys.Count; index++) {
+				var key = caseKeys[index];
+				var keyText = GenericActivityShapes.FormatValue(key);
+				var id = (path.Length == 0 ? "" : path + ".") + "$case-" + index;
+				var branch = @switch.ActivityAt(index);
 				childNodes.Add(new DesignerElementNode {
-					Id = id, Path = path, Name = "Case " + entry.Key, Type = "SwitchCase",
-					Properties = new List<DesignerPropertyInfo> { new() { Name = "$caseValue", DisplayName = "Case value", Value = entry.Key.ToString(), TypeName = "Int32", IsReadOnly = false, Category = "Switch" } },
-					Children = entry.Value == null ? new List<DesignerElementNode>() : new List<DesignerElementNode> { Node(document, entry.Value, id + ".0") }
+					Id = id, Path = path, Name = "Case " + keyText, Type = "SwitchCase",
+					Properties = new List<DesignerPropertyInfo> { new() { Name = "$caseValue", DisplayName = "Case value", Value = keyText, TypeName = @switch.KeyType.Name, IsReadOnly = false, Category = "Switch" } },
+					Children = branch == null ? new List<DesignerElementNode>() : new List<DesignerElementNode> { Node(document, branch, id + ".0") }
 				});
 			}
 			if (@switch.Default != null) {

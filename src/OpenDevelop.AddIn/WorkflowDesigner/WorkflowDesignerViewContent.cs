@@ -110,7 +110,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		toolboxPane.Children.Add(toolbox);
 		RefreshToolboxView();
 		toolbox.SelectionChanged += (_, _) => toolboxModel.Select((toolbox.SelectedItem as DesignerToolboxItemInfo)?.TypeName);
-		toolbox.MouseDoubleClick += (_, _) => { if (toolboxModel.SelectedItem is { } item) Add(item.TypeName); };
+		toolbox.MouseDoubleClick += (_, _) => { if (toolboxModel.SelectedItem is { } item) AddToolboxItem(item); };
 		toolbox.PreviewMouseMove += (_, e) => { if (e.LeftButton == MouseButtonState.Pressed && toolboxModel.SelectedItem is { } item) DragDrop.DoDragDrop(toolbox, item, DragDropEffects.Copy); };
 
 		// Ordered multi-selection + shared pad/command bridge (designer-common.md's 2026-08-24
@@ -215,7 +215,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		};
 		surface.AllowDrop = true;
 		surface.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(typeof(DesignerToolboxItemInfo)) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
-		surface.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) Add(item.TypeName); e.Handled = true; };
+		surface.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) AddToolboxItem(item); e.Handled = true; };
 		canvas.ContentHost.Content = scroller;
 	}
 
@@ -323,6 +323,67 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 	public bool IsRunModelCompleted => runningWorkflow?.IsCompleted == true;
 	public WorkflowRunResult? CompletedRunModel => runningWorkflow is { IsCompletedSuccessfully: true } ? runningWorkflow.Result : null;
 
+	/// <summary>Inserts a toolbox item, asking for the type argument first when the item is an
+	/// open generic activity (ForEach&lt;T&gt;, Switch&lt;T&gt;, ...). The chosen type travels to the
+	/// host appended to the item's type name.</summary>
+	public bool AddToolboxItem(DesignerToolboxItemInfo item, string? targetParentId = null)
+	{
+		if (!IsOpenGenericToolboxItem(item)) return Add(item.TypeName, targetParentId);
+		var typeArgument = AskForTypeArgument(item);
+		return typeArgument != null && Add(item.TypeName + "|" + typeArgument, targetParentId);
+	}
+
+	/// <summary>An open generic type name carries its arity (<c>ForEach`1</c>) but no bracketed
+	/// type arguments, which is how the host advertises "this item needs a type".</summary>
+	public static bool IsOpenGenericToolboxItem(DesignerToolboxItemInfo item)
+	{
+		var name = item.TypeName;
+		var tick = name.IndexOf('`');
+		return tick >= 0 && name.IndexOf('[', tick) < 0;
+	}
+
+	/// <summary>Prompts for the type argument of a generic activity. Returns null when cancelled.</summary>
+	string? AskForTypeArgument(DesignerToolboxItemInfo item)
+	{
+		var chosen = (string?)null;
+		var types = new ComboBox { Margin = new Thickness(8), IsEditable = true, ItemsSource = CommonTypeArguments, Text = "String" };
+		var hint = new TextBlock { Margin = new Thickness(8, 0, 8, 8), Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap, Text = "Pick the element type, or type any type name the project can see." };
+		var insert = new Button { Content = "Insert", Margin = new Thickness(8), MinWidth = 75, IsDefault = true };
+		var cancel = new Button { Content = "Cancel", Margin = new Thickness(8), MinWidth = 75, IsCancel = true };
+		var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+		buttons.Children.Add(cancel); buttons.Children.Add(insert);
+		var panel = new DockPanel();
+		DockPanel.SetDock(types, Dock.Top); DockPanel.SetDock(hint, Dock.Top); DockPanel.SetDock(buttons, Dock.Bottom);
+		panel.Children.Add(types); panel.Children.Add(hint); panel.Children.Add(buttons);
+		var window = new Window {
+			Title = item.DisplayName.Replace(" <T>", "") + " - type argument",
+			Width = 380, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize,
+			Content = panel, Owner = Window.GetWindow(UserContent as DependencyObject)
+		};
+		insert.Click += (_, _) => { chosen = types.Text?.Trim(); if (!string.IsNullOrEmpty(chosen)) window.Close(); };
+		cancel.Click += (_, _) => { chosen = null; window.Close(); };
+		types.Loaded += (_, _) => types.Focus();
+		window.ShowDialog();
+		return string.IsNullOrWhiteSpace(chosen) ? null : chosen;
+	}
+
+	/// <summary>Renders a type name for the status line: a bare activity name, or "ForEach&lt;String&gt;"
+	/// for the open-generic-plus-argument form the toolbox sends to the host.</summary>
+	static string DescribeInsertedType(string type)
+	{
+		var separator = type.LastIndexOf('|');
+		var definition = separator > 0 ? type[..separator] : type;
+		var comma = definition.IndexOf(',');
+		if (comma > 0) definition = definition[..comma];
+		var dot = definition.LastIndexOf('.');
+		if (dot >= 0) definition = definition[(dot + 1)..];
+		var tick = definition.IndexOf('`');
+		if (tick >= 0) definition = definition[..tick];
+		return separator > 0 ? definition + "<" + type[(separator + 1)..] + ">" : definition;
+	}
+
+	static readonly string[] CommonTypeArguments = { "String", "Int32", "Int64", "Boolean", "Double", "Decimal", "DateTime", "TimeSpan", "Guid", "Object" };
+
 	public bool Add(string type, string? targetParentId = null)
 	{
 		if (host == null || state.Tree == null) return false;
@@ -331,7 +392,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		try {
 			Mutate(() => host.AddElementAsync(state.Version, parentId, new DesignerToolboxItemInfo { Name = type, TypeName = type }, "", 0, 0).GetAwaiter().GetResult());
 		} catch (Exception exception) {
-			diagnostic.Text = $"Cannot insert {type}: {exception.Message}";
+			diagnostic.Text = $"Cannot insert {DescribeInsertedType(type)}: {exception.Message}";
 			return false;
 		}
 		// The host is authoritative about the inserted structural ID. Collection edits can
@@ -1252,7 +1313,7 @@ public sealed class WorkflowDesignerViewContent : AbstractViewContentHandlingLoa
 		TextElement.SetForeground(border, ActivityInk);
 		border.AllowDrop = true;
 		border.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(typeof(DesignerToolboxItemInfo)) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
-		border.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) Add(item.TypeName, node.Id); e.Handled = true; };
+		border.Drop += (_, e) => { if (e.Data.GetData(typeof(DesignerToolboxItemInfo)) is DesignerToolboxItemInfo item) AddToolboxItem(item, node.Id); e.Handled = true; };
 		border.MouseLeftButtonDown += (_, e) => {
 			if (pendingFlowSourceId != null && node.Id != pendingFlowSourceId) {
 				ConnectArmedFlowTarget(node.Id);

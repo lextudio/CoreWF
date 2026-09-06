@@ -787,19 +787,78 @@ public sealed class WorkflowDocumentTests
 	[Fact]
 	public void Int32_switch_case_value_can_be_changed_without_losing_its_handler()
 	{
+		// Case element ids are ordinal, so rekeying a case keeps its id and its handler; only the
+		// case value the properties pad shows changes.
 		var document = Load(new Switch<int> { Expression = new InArgument<int>(0) });
 		Assert.Equal("$case-0", document.AddChild("", "SwitchCase"));
 		Assert.Equal("$case-0.0.0", document.AddChild("$case-0.0", "If"));
 		Assert.Equal("$case-1", document.AddChild("", "SwitchCase"));
 		Assert.True(document.SetProperty("$case-0", "$caseValue", "7"));
-		Assert.Null(document.Find("$case-0.0"));
-		Assert.IsType<If>(document.Find("$case-7.0.0"));
-		Assert.False(document.SetProperty("$case-7", "$caseValue", "1"));
+		Assert.IsType<If>(document.Find("$case-0.0.0"));
+		Assert.False(document.SetProperty("$case-0", "$caseValue", "1"));
 
 		var reloaded = new WorkflowDocument();
 		reloaded.Reset(document.ToXaml());
 		Assert.True(reloaded.LastParseSucceeded, reloaded.Error);
-		Assert.IsType<If>(reloaded.Find("$case-7.0.0"));
+		Assert.IsType<If>(reloaded.Find("$case-0.0.0"));
+	}
+
+	[Fact]
+	public void A_generic_toolbox_item_is_closed_with_the_requested_type_argument()
+	{
+		var document = Load(new Sequence());
+		var forEach = typeof(ForEach<>).AssemblyQualifiedName + "|System.String";
+		Assert.Equal("0", document.AddChild("", forEach));
+		var added = Assert.IsType<ForEach<string>>(document.Find("0"));
+		// A freshly dropped loop must be renderable and runnable, so its required Values argument
+		// is seeded with an empty sequence of its own element type.
+		Assert.NotNull(added.Values?.Expression);
+
+		var reloaded = new WorkflowDocument();
+		reloaded.Reset(document.ToXaml());
+		Assert.True(reloaded.LastParseSucceeded, reloaded.Error);
+		Assert.IsType<ForEach<string>>(reloaded.Find("0"));
+	}
+
+	[Fact]
+	public void A_generic_toolbox_item_dropped_without_a_type_argument_falls_back_to_Object()
+	{
+		var document = Load(new Sequence());
+		Assert.Equal("0", document.AddChild("", typeof(Switch<>).AssemblyQualifiedName!));
+		Assert.IsType<Switch<object>>(document.Find("0"));
+	}
+
+	[Fact]
+	public void A_string_keyed_switch_is_editable_through_the_same_case_ids()
+	{
+		var document = Load(new Switch<string> { Expression = new InArgument<string>("") });
+		Assert.Equal("$case-0", document.AddChild("", "SwitchCase"));
+		Assert.Equal("$case-0.0.0", document.AddChild("$case-0.0", "If"));
+		Assert.True(document.SetProperty("$case-0", "$caseValue", "ready"));
+		Assert.Equal("$case-1", document.AddChild("", "SwitchCase"));
+		Assert.False(document.SetProperty("$case-1", "$caseValue", "ready"));
+
+		var reloaded = new WorkflowDocument();
+		reloaded.Reset(document.ToXaml());
+		Assert.True(reloaded.LastParseSucceeded, reloaded.Error);
+		Assert.IsType<If>(reloaded.Find("$case-0.0.0"));
+		Assert.True(reloaded.Remove("$case-0"));
+		Assert.Null(reloaded.Find("$case-0.0.0"));
+	}
+
+	[Fact]
+	public void A_string_loop_body_declares_its_item_variable_with_the_loop_element_type()
+	{
+		var document = Load(new ForEach<string>());
+		Assert.Equal("$foreach-body.0", document.AddChild("$foreach-body", "If"));
+		Assert.True(document.SetProperty("$foreach-body", "$itemName", "line"));
+		var itemVariable = Assert.Single(document.GetVariablesVisibleAt("$foreach-body.0").Where(variable => variable.Name == "line"));
+		Assert.Equal("String", itemVariable.TypeName);
+
+		var reloaded = new WorkflowDocument();
+		reloaded.Reset(document.ToXaml());
+		Assert.True(reloaded.LastParseSucceeded, reloaded.Error);
+		Assert.IsType<If>(reloaded.Find("$foreach-body.0"));
 	}
 
 	[Fact]

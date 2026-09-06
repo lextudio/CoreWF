@@ -221,10 +221,12 @@ sealed class WorkflowDocument
 		var variables = string.IsNullOrEmpty(elementId)
 			? GetVariables().Where(variable => variable.ScopeId.Length == 0).ToList()
 			: GetVariables().Where(variable => variable.ScopeId.Length == 0 || elementId == variable.ScopeId || elementId.StartsWith(variable.ScopeId + ".", StringComparison.Ordinal)).ToList();
-		if (elementId != null && TryFindForEachBody(elementId, out var forEach, out _) && !string.IsNullOrWhiteSpace(forEach.Body?.Argument?.Name))
-			variables.Add((forEach.Body.Argument.Name, "Int32", "For Each item", elementId, ""));
-		if (elementId != null && TryFindParallelForEachBody(elementId, out var parallelForEach, out _) && !string.IsNullOrWhiteSpace(parallelForEach.Body?.Argument?.Name))
-			variables.Add((parallelForEach.Body.Argument.Name, "Int32", "Parallel For Each item", elementId, ""));
+		// The loop's iteration variable is in scope for expressions inside its body, and its type
+		// is the loop's own element type rather than a fixed Int32.
+		if (elementId != null && TryFindForEachBody(elementId, out var forEach, out _) && forEach.Argument is { Name.Length: > 0 } forEachArgument)
+			variables.Add((forEachArgument.Name, forEach.ItemType.Name, "For Each item", elementId, ""));
+		if (elementId != null && TryFindParallelForEachBody(elementId, out var parallelForEach, out _) && parallelForEach.Argument is { Name.Length: > 0 } parallelArgument)
+			variables.Add((parallelArgument.Name, parallelForEach.ItemType.Name, "Parallel For Each item", elementId, ""));
 		if (elementId != null && TryFindCatch(elementId, out _, out var @catch, out _, out _) && @catch.GetType().GetProperty("Action")?.GetValue(@catch) is ActivityDelegate action && action.GetType().GetProperty("Argument")?.GetValue(action) is DelegateArgument { Name.Length: > 0 } argument)
 			variables.Add((argument.Name, @catch.ExceptionType.Name, "Catch exception", elementId, ""));
 		return variables;
@@ -394,6 +396,34 @@ sealed class WorkflowDocument
 
 	object? FindVariableScope(string scopeId) => TryFindState(scopeId, out _, out var state, out _, out var suffix) && suffix.Length == 0 ? state : Find(scopeId);
 
+	/// <summary>Resolves a type the user typed (a C# keyword alias, a simple name, or a qualified
+	/// name), returning null rather than a fallback when it does not name a real type.</summary>
+	public static Type? ResolveUserTypeName(string name)
+	{
+		var text = name.Trim();
+		if (text.Length == 0) return null;
+		var alias = text.ToLowerInvariant() switch {
+			"string" => typeof(string), "int" or "int32" => typeof(int), "long" or "int64" => typeof(long),
+			"bool" or "boolean" => typeof(bool), "double" => typeof(double), "decimal" => typeof(decimal),
+			"float" or "single" => typeof(float), "char" => typeof(char), "byte" => typeof(byte),
+			"object" => typeof(object), "timespan" => typeof(TimeSpan), "datetime" => typeof(DateTime),
+			"guid" => typeof(Guid), "uri" => typeof(Uri), "exception" => typeof(Exception), _ => null
+		};
+		if (alias != null) return alias;
+		if (Type.GetType(text, throwOnError: false) is { } qualified) return qualified;
+		var candidates = AppDomain.CurrentDomain.GetAssemblies();
+		foreach (var prefix in new[] { "", "System.", "System.Collections.Generic." })
+			foreach (var assembly in candidates)
+				if (assembly.GetType(prefix + text, throwOnError: false) is { } found) return found;
+		// A bare simple name is the common case for a project's own activity/data types.
+		foreach (var assembly in candidates) {
+			Type[] types;
+			try { types = assembly.GetTypes(); } catch { continue; }
+			if (types.FirstOrDefault(type => string.Equals(type.Name, text, StringComparison.Ordinal)) is { } match) return match;
+		}
+		return null;
+	}
+
 	static Type ResolveArgumentType(string name) => name.Trim().ToLowerInvariant() switch {
 		"string" => typeof(string), "int" or "int32" => typeof(int), "bool" or "boolean" => typeof(bool),
 		"double" => typeof(double), "decimal" => typeof(decimal), "timespan" => typeof(TimeSpan),
@@ -525,8 +555,8 @@ sealed class WorkflowDocument
 			}
 		}
 		if (string.Equals(propertyName, "$itemName", StringComparison.Ordinal) && System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z_][A-Za-z0-9_]*$")) {
-			if (TryFindForEachBody(id, out var forEach, out var suffix) && suffix.Length == 0 && forEach.Body != null) { forEach.Body.Argument ??= new DelegateInArgument<int>(); forEach.Body.Argument.Name = value; return true; }
-			if (TryFindParallelForEachBody(id, out var parallelForEach, out suffix) && suffix.Length == 0 && parallelForEach.Body != null) { parallelForEach.Body.Argument ??= new DelegateInArgument<int>(); parallelForEach.Body.Argument.Name = value; return true; }
+			if (TryFindForEachBody(id, out var forEach, out var suffix) && suffix.Length == 0) { forEach.SetArgumentName(value); return true; }
+			if (TryFindParallelForEachBody(id, out var parallelForEach, out suffix) && suffix.Length == 0) { parallelForEach.SetArgumentName(value); return true; }
 		}
 		if (string.Equals(propertyName, "$exceptionName", StringComparison.Ordinal) && System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z_][A-Za-z0-9_]*$") && TryFindCatch(id, out _, out var namedCatch, out var namedCatchIndex, out _) && id.EndsWith("$catch-" + namedCatchIndex, StringComparison.Ordinal) && namedCatch.GetType().GetProperty("Action")?.GetValue(namedCatch) is ActivityDelegate namedAction) { var argument = namedAction.GetType().GetProperty("Argument"); if (argument == null) return false; var delegateArgument = argument.GetValue(namedAction) as DelegateArgument ?? (DelegateArgument)Activator.CreateInstance(typeof(DelegateInArgument<>).MakeGenericType(namedCatch.ExceptionType))!; delegateArgument.Name = value; argument.SetValue(namedAction, delegateArgument); return true; }
 		if (TryFindCatch(id, out var catchOwner, out var catchNode, out var catchIndex, out _)
@@ -552,15 +582,9 @@ sealed class WorkflowDocument
 			catchOwner.Catches[catchIndex] = replacement;
 			return true;
 		}
-		if (TryFindSwitchBranch(id, out var switchOwner, out var switchBranch, out var switchKey, out var switchSuffix)
-			&& switchSuffix.Length == 0 && switchKey is int existingKey && string.Equals(propertyName, "$caseValue", StringComparison.Ordinal)) {
-			if (!int.TryParse(value, out var replacementKey) || switchBranch == null) return false;
-			if (replacementKey == existingKey) return true;
-			if (switchOwner.Cases.ContainsKey(replacementKey)) return false;
-			switchOwner.Cases.Remove(existingKey);
-			switchOwner.Cases.Add(replacementKey, switchBranch);
-			return true;
-		}
+		if (TryFindSwitchBranch(id, out var switchOwner, out _, out var switchCaseIndex, out var switchSuffix)
+			&& switchSuffix.Length == 0 && switchCaseIndex is int existingIndex && string.Equals(propertyName, "$caseValue", StringComparison.Ordinal))
+			return switchOwner.TryRekey(existingIndex, value, out _);
 		if (TryFindFlowDecision(id, out var decision, out var flowchartPath)) {
 			var decisionProperty = decision.GetType().GetProperty(propertyName);
 			if (decisionProperty == null || !decisionProperty.CanWrite) return false;
@@ -610,21 +634,19 @@ sealed class WorkflowDocument
 			return null;
 		}
 		if (TryFindForEachBody(parentId, out var forEach, out var forEachSuffix) && forEachSuffix.Length == 0) {
-			if (forEach.Body?.Handler != null) return null;
+			if (forEach.Handler != null) return null;
 			var bodyActivityType = ResolveActivityType(typeName);
 			if (bodyActivityType == null || Activator.CreateInstance(bodyActivityType) is not Activity bodyActivity) return null;
 			InitializeRequiredArguments(bodyActivity);
-			forEach.Body ??= new ActivityAction<int> { Argument = new DelegateInArgument<int> { Name = "item" } };
-			forEach.Body.Handler = bodyActivity;
+			forEach.Handler = bodyActivity;
 			return parentId + ".0";
 		}
 		if (TryFindParallelForEachBody(parentId, out var parallelForEach, out var parallelForEachSuffix) && parallelForEachSuffix.Length == 0) {
-			if (parallelForEach.Body?.Handler != null) return null;
+			if (parallelForEach.Handler != null) return null;
 			var bodyActivityType = ResolveActivityType(typeName);
 			if (bodyActivityType == null || Activator.CreateInstance(bodyActivityType) is not Activity bodyActivity) return null;
 			InitializeRequiredArguments(bodyActivity);
-			parallelForEach.Body ??= new ActivityAction<int> { Argument = new DelegateInArgument<int> { Name = "item" } };
-			parallelForEach.Body.Handler = bodyActivity;
+			parallelForEach.Handler = bodyActivity;
 			return parentId + ".0";
 		}
 		if (TryFindPickBranch(parentId, out _, out var pickBranch, out _, out var pickSuffix) && pickSuffix.Length == 0) {
@@ -635,12 +657,12 @@ sealed class WorkflowDocument
 			if (pickBranch.Action == null) { pickBranch.Action = branchActivity; return parentId + ".1"; }
 			return null;
 		}
-		if (TryFindSwitchBranch(parentId, out var switchOwner, out var switchBranch, out var switchKey, out var switchSuffix) && switchSuffix.Length == 0) {
+		if (TryFindSwitchBranch(parentId, out var switchOwner, out var switchBranch, out var switchCaseIndex, out var switchSuffix) && switchSuffix.Length == 0) {
 			if (switchBranch != null) return null;
 			var handlerType = ResolveActivityType(typeName);
 			if (handlerType == null || Activator.CreateInstance(handlerType) is not Activity handler) return null;
 			InitializeRequiredArguments(handler);
-			if (switchKey is int caseKey) switchOwner.Cases[caseKey] = handler;
+			if (switchCaseIndex is int caseIndex) { if (!switchOwner.SetActivityAt(caseIndex, handler)) return null; }
 			else switchOwner.Default = handler;
 			return parentId + ".0";
 		}
@@ -664,15 +686,13 @@ sealed class WorkflowDocument
 			pick.Branches.Add(new PickBranch());
 			return PickBranchId(parentId, pick.Branches.Count - 1);
 		}
-		if (parent is Switch<int> intSwitch && string.Equals(typeName, "SwitchCase", StringComparison.Ordinal)) {
-			var key = 0;
-			while (intSwitch.Cases.ContainsKey(key)) key++;
-			intSwitch.Cases.Add(key, new Sequence());
-			return SwitchCaseId(parentId, key);
+		if (GenericActivityShapes.SwitchShape.For(parent) is { } parentSwitch && string.Equals(typeName, "SwitchCase", StringComparison.Ordinal)) {
+			var caseIndex = parentSwitch.AddCase(new Sequence());
+			return caseIndex < 0 ? null : SwitchCaseId(parentId, caseIndex);
 		}
-		if (parent is Switch<int> defaultSwitch && string.Equals(typeName, "SwitchDefault", StringComparison.Ordinal)) {
-			if (defaultSwitch.Default != null) return null;
-			defaultSwitch.Default = new Sequence();
+		if (GenericActivityShapes.SwitchShape.For(parent) is { } parentDefaultSwitch && string.Equals(typeName, "SwitchDefault", StringComparison.Ordinal)) {
+			if (parentDefaultSwitch.Default != null) return null;
+			parentDefaultSwitch.Default = new Sequence();
 			return SwitchDefaultId(parentId);
 		}
 		if (parent is TryCatch tryCatch && string.Equals(typeName, "Catch", StringComparison.Ordinal)) {
@@ -808,14 +828,12 @@ sealed class WorkflowDocument
 			if (!state.IsFinal && state.Exit == null) { state.Exit = child; return parentId + ".1"; }
 			return null;
 		}
-		if (TryFindForEachBody(parentId, out var forEach, out var forEachSuffix) && forEachSuffix.Length == 0 && forEach.Body?.Handler == null) {
-			forEach.Body ??= new ActivityAction<int> { Argument = new DelegateInArgument<int> { Name = "item" } };
-			forEach.Body.Handler = child;
+		if (TryFindForEachBody(parentId, out var forEach, out var forEachSuffix) && forEachSuffix.Length == 0 && forEach.Handler == null) {
+			forEach.Handler = child;
 			return parentId + ".0";
 		}
-		if (TryFindParallelForEachBody(parentId, out var parallelForEach, out var parallelForEachSuffix) && parallelForEachSuffix.Length == 0 && parallelForEach.Body?.Handler == null) {
-			parallelForEach.Body ??= new ActivityAction<int> { Argument = new DelegateInArgument<int> { Name = "item" } };
-			parallelForEach.Body.Handler = child;
+		if (TryFindParallelForEachBody(parentId, out var parallelForEach, out var parallelForEachSuffix) && parallelForEachSuffix.Length == 0 && parallelForEach.Handler == null) {
+			parallelForEach.Handler = child;
 			return parentId + ".0";
 		}
 		if (TryFindPickBranch(parentId, out _, out var branch, out _, out var pickSuffix) && pickSuffix.Length == 0) {
@@ -823,8 +841,8 @@ sealed class WorkflowDocument
 			if (branch.Action == null) { branch.Action = child; return parentId + ".1"; }
 			return null;
 		}
-		if (TryFindSwitchBranch(parentId, out var @switch, out var existing, out var key, out var switchSuffix) && switchSuffix.Length == 0 && existing == null) {
-			if (key is int caseKey) @switch.Cases[caseKey] = child;
+		if (TryFindSwitchBranch(parentId, out var @switch, out var existing, out var caseIndex, out var switchSuffix) && switchSuffix.Length == 0 && existing == null) {
+			if (caseIndex is int targetCaseIndex) { if (!@switch.SetActivityAt(targetCaseIndex, child)) return null; }
 			else @switch.Default = child;
 			return parentId + ".0";
 		}
@@ -857,7 +875,7 @@ sealed class WorkflowDocument
 
 	static string FlowDecisionId(string flowchartPath, int index) => (flowchartPath.Length == 0 ? "" : flowchartPath + ".") + "$decision-" + index;
 	static string CatchId(string tryCatchPath, int index) => (tryCatchPath.Length == 0 ? "" : tryCatchPath + ".") + "$catch-" + index;
-	static string SwitchCaseId(string switchPath, int key) => (switchPath.Length == 0 ? "" : switchPath + ".") + "$case-" + key;
+	static string SwitchCaseId(string switchPath, int caseIndex) => (switchPath.Length == 0 ? "" : switchPath + ".") + "$case-" + caseIndex;
 	static string SwitchDefaultId(string switchPath) => (switchPath.Length == 0 ? "" : switchPath + ".") + "$default";
 	static string PickBranchId(string pickPath, int index) => (pickPath.Length == 0 ? "" : pickPath + ".") + "$pick-" + index;
 	static string ForEachBodyId(string forEachPath) => (forEachPath.Length == 0 ? "" : forEachPath + ".") + "$foreach-body";
@@ -890,29 +908,20 @@ sealed class WorkflowDocument
 		owner = found; state = found.States[index]; suffix = separator < 0 ? "" : rest[separator..]; return true;
 	}
 
-	bool TryFindForEachBody(string id, out ForEach<int> owner, out string suffix)
-	{
-		owner = null!;
-		suffix = "";
-		var marker = id.LastIndexOf("$foreach-body", StringComparison.Ordinal);
-		if (marker < 0) return false;
-		var ownerPath = marker == 0 ? "" : id[..marker].TrimEnd('.');
-		if (Find(ownerPath) is not ForEach<int> found) return false;
-		owner = found;
-		suffix = id[(marker + "$foreach-body".Length)..];
-		return true;
-	}
+	bool TryFindForEachBody(string id, out GenericActivityShapes.ForEachShape owner, out string suffix) => TryFindForEachBody(id, "$foreach-body", parallel: false, out owner, out suffix);
 
-	bool TryFindParallelForEachBody(string id, out ParallelForEach<int> owner, out string suffix)
+	bool TryFindParallelForEachBody(string id, out GenericActivityShapes.ForEachShape owner, out string suffix) => TryFindForEachBody(id, "$parallelforeach-body", parallel: true, out owner, out suffix);
+
+	bool TryFindForEachBody(string id, string marker, bool parallel, out GenericActivityShapes.ForEachShape owner, out string suffix)
 	{
 		owner = null!;
 		suffix = "";
-		var marker = id.LastIndexOf("$parallelforeach-body", StringComparison.Ordinal);
-		if (marker < 0) return false;
-		var ownerPath = marker == 0 ? "" : id[..marker].TrimEnd('.');
-		if (Find(ownerPath) is not ParallelForEach<int> found) return false;
+		var position = id.LastIndexOf(marker, StringComparison.Ordinal);
+		if (position < 0) return false;
+		var ownerPath = position == 0 ? "" : id[..position].TrimEnd('.');
+		if (GenericActivityShapes.ForEachShape.For(Find(ownerPath), parallel) is not { } found) return false;
 		owner = found;
-		suffix = id[(marker + "$parallelforeach-body".Length)..];
+		suffix = id[(position + marker.Length)..];
 		return true;
 	}
 
@@ -935,18 +944,21 @@ sealed class WorkflowDocument
 		return true;
 	}
 
-	bool TryFindSwitchBranch(string id, out Switch<int> owner, out Activity? branch, out int? caseKey, out string suffix)
+	/// <summary><paramref name="caseIndex"/> is the ordinal position of the case in the switch's
+	/// case enumeration, not the case key: the key can be any <c>T</c> and would not survive being
+	/// embedded in a dotted element-path id.</summary>
+	bool TryFindSwitchBranch(string id, out GenericActivityShapes.SwitchShape owner, out Activity? branch, out int? caseIndex, out string suffix)
 	{
 		owner = null!;
 		branch = null;
-		caseKey = null;
+		caseIndex = null;
 		suffix = "";
 		var caseMarker = id.LastIndexOf("$case-", StringComparison.Ordinal);
 		var defaultMarker = id.LastIndexOf("$default", StringComparison.Ordinal);
 		var marker = Math.Max(caseMarker, defaultMarker);
 		if (marker < 0) return false;
 		var ownerPath = marker == 0 ? "" : id[..marker].TrimEnd('.');
-		if (Find(ownerPath) is not Switch<int> found) return false;
+		if (GenericActivityShapes.SwitchShape.For(Find(ownerPath)) is not { } found) return false;
 		owner = found;
 		if (marker == defaultMarker) {
 			suffix = id[(marker + "$default".Length)..];
@@ -955,10 +967,10 @@ sealed class WorkflowDocument
 		}
 		var rest = id[(marker + "$case-".Length)..];
 		var separator = rest.IndexOf('.');
-		if (!int.TryParse(separator < 0 ? rest : rest[..separator], out var key)) return false;
-		caseKey = key;
+		if (!int.TryParse(separator < 0 ? rest : rest[..separator], out var index)) return false;
+		caseIndex = index;
 		suffix = separator < 0 ? "" : rest[separator..];
-		owner.Cases.TryGetValue(key, out branch);
+		branch = owner.ActivityAt(index);
 		return true;
 	}
 
@@ -1011,16 +1023,53 @@ sealed class WorkflowDocument
 			case Delay delay:
 				delay.Duration = new InArgument<TimeSpan>(TimeSpan.Zero);
 				break;
-			case Switch<int> @switch:
-				@switch.Expression = new InArgument<int>(0);
-				break;
-			case ForEach<int> forEach:
-				forEach.Values = new InArgument<IEnumerable<int>>(new Microsoft.CSharp.Activities.CSharpValue<IEnumerable<int>>("new int[0]"));
-				break;
-			case ParallelForEach<int> parallelForEach:
-				parallelForEach.Values = new InArgument<IEnumerable<int>>(new Microsoft.CSharp.Activities.CSharpValue<IEnumerable<int>>("new int[0]"));
-				break;
 		}
+		if (GenericActivityShapes.TypeArgument(activity, typeof(Switch<>)) is { } switchKeyType) {
+			// A reference key type has no meaningful literal default - and Literal<T> rejects
+			// reference types outright - but the argument still has to be supplied for the tree to
+			// validate, so seed a default-valued expression instead.
+			if (DefaultOf(switchKeyType) is { } switchDefault) SeedRequiredArgument(activity, "Expression", switchKeyType, switchDefault);
+			else SeedRequiredArgument(activity, "Expression", switchKeyType, DefaultExpression(switchKeyType), expressionIsActivity: true);
+		}
+		var loopItemType = GenericActivityShapes.TypeArgument(activity, typeof(ForEach<>)) ?? GenericActivityShapes.TypeArgument(activity, typeof(ParallelForEach<>));
+		if (loopItemType != null) {
+			// An empty sequence of the loop's own element type keeps a freshly dropped loop both
+			// renderable and runnable until the user supplies the real collection expression.
+			var sequenceType = typeof(IEnumerable<>).MakeGenericType(loopItemType);
+			var expressionType = typeof(Microsoft.CSharp.Activities.CSharpValue<>).MakeGenericType(sequenceType);
+			var expression = Activator.CreateInstance(expressionType, "System.Array.Empty<" + CSharpTypeName(loopItemType) + ">()");
+			SeedRequiredArgument(activity, "Values", sequenceType, expression, expressionIsActivity: true);
+		}
+	}
+
+	/// <summary>Assigns <c>InArgument{T}</c> on a property of a closed generic activity whose
+	/// <c>T</c> is only known at run time.</summary>
+	static void SeedRequiredArgument(Activity activity, string propertyName, Type valueType, object? value, bool expressionIsActivity = false)
+	{
+		if (value == null) return;
+		var property = activity.GetType().GetProperty(propertyName);
+		if (property == null || !property.CanWrite || property.GetValue(activity) != null) return;
+		var argumentType = typeof(InArgument<>).MakeGenericType(valueType);
+		var parameterType = expressionIsActivity ? typeof(Activity<>).MakeGenericType(valueType) : valueType;
+		var constructor = argumentType.GetConstructor(new[] { parameterType });
+		if (constructor == null) return;
+		property.SetValue(activity, constructor.Invoke(new[] { value }));
+	}
+
+	/// <summary>A CoreWF C# expression yielding the default of a type that cannot be a literal.</summary>
+	static object DefaultExpression(Type type) =>
+		Activator.CreateInstance(typeof(Microsoft.CSharp.Activities.CSharpValue<>).MakeGenericType(type), "default(" + CSharpTypeName(type) + ")")!;
+
+	static object? DefaultOf(Type type) => type == typeof(string) ? "" : type.IsValueType ? Activator.CreateInstance(type) : null;
+
+	/// <summary>Renders a type the way it must appear inside a CoreWF C# expression.</summary>
+	static string CSharpTypeName(Type type)
+	{
+		if (!type.IsGenericType) return type.FullName?.Replace('+', '.') ?? type.Name;
+		var name = type.GetGenericTypeDefinition().FullName ?? type.Name;
+		var tick = name.IndexOf('`');
+		if (tick >= 0) name = name[..tick];
+		return name.Replace('+', '.') + "<" + string.Join(", ", type.GetGenericArguments().Select(CSharpTypeName)) + ">";
 	}
 
 	public bool Remove(string id)
@@ -1043,12 +1092,12 @@ sealed class WorkflowDocument
 			if (stateSuffix == ".0" && state.Entry != null) { state.Entry = null; return true; }
 			if (stateSuffix == ".1" && state.Exit != null) { state.Exit = null; return true; }
 		}
-		if (TryFindForEachBody(id, out var forEach, out var forEachSuffix) && forEachSuffix == ".0" && forEach.Body?.Handler != null) {
-			forEach.Body.Handler = null;
+		if (TryFindForEachBody(id, out var forEach, out var forEachSuffix) && forEachSuffix == ".0" && forEach.Handler != null) {
+			forEach.Handler = null;
 			return true;
 		}
-		if (TryFindParallelForEachBody(id, out var parallelForEach, out var parallelForEachSuffix) && parallelForEachSuffix == ".0" && parallelForEach.Body?.Handler != null) {
-			parallelForEach.Body.Handler = null;
+		if (TryFindParallelForEachBody(id, out var parallelForEach, out var parallelForEachSuffix) && parallelForEachSuffix == ".0" && parallelForEach.Handler != null) {
+			parallelForEach.Handler = null;
 			return true;
 		}
 		if (TryFindPickBranch(id, out var pickOwner, out var pickBranch, out var pickIndex, out var pickSuffix)) {
@@ -1058,7 +1107,7 @@ sealed class WorkflowDocument
 		}
 		if (TryFindSwitchBranch(id, out var switchOwner, out _, out var switchKey, out var switchSuffix)) {
 			if (switchSuffix.Length == 0 || switchSuffix == ".0") {
-				if (switchKey is int caseKey) return switchOwner.Cases.Remove(caseKey);
+				if (switchKey is int caseIndex) return switchOwner.RemoveAt(caseIndex);
 				if (switchOwner.Default == null) return false;
 				switchOwner.Default = null;
 				return true;
@@ -1242,11 +1291,59 @@ sealed class WorkflowDocument
 
 	static Type? ResolveActivityType(string typeName)
 	{
+		// Legacy toolbox names from before generic activities carried their own type argument.
 		if (string.Equals(typeName, "SwitchInt32", StringComparison.Ordinal)) return typeof(Switch<int>);
 		if (string.Equals(typeName, "ForEachInt32", StringComparison.Ordinal)) return typeof(ForEach<int>);
 		if (string.Equals(typeName, "ParallelForEachInt32", StringComparison.Ordinal)) return typeof(ParallelForEach<int>);
-		if (typeName.Contains('.')) return Type.GetType(typeName) ?? typeof(Sequence).Assembly.GetType(typeName);
-		return typeof(Sequence).Assembly.GetType("System.Activities.Statements." + typeName);
+		// The designer appends the chosen type argument to an open generic toolbox item's type
+		// name ("ForEach`1, ...|System.String"), which keeps the whole choice inside the single
+		// TypeName field the toolbox protocol carries.
+		var separator = typeName.LastIndexOf('|');
+		if (separator > 0) {
+			var definition = ResolveTypeName(typeName[..separator]);
+			var argument = ResolveUserTypeName(typeName[(separator + 1)..]);
+			return definition == null || argument == null ? null : CloseGenericActivityType(definition, argument);
+		}
+		var resolved = ResolveTypeName(typeName);
+		// An open generic (ForEach`1 with no type argument) is not constructible. Closing it with
+		// Object keeps a drop that skipped the type-argument prompt usable rather than silently
+		// failing; the concrete element type stays editable afterwards.
+		if (resolved is { ContainsGenericParameters: true, IsGenericTypeDefinition: true } && resolved.GetGenericArguments().Length == 1)
+			resolved = CloseGenericActivityType(resolved, typeof(object));
+		return resolved is { ContainsGenericParameters: false } ? resolved : null;
+	}
+
+	/// <summary>Closes a single-parameter generic activity type, honoring the parameter's own
+	/// constraints so an unsatisfiable request fails here instead of throwing from reflection.</summary>
+	public static Type? CloseGenericActivityType(Type openDefinition, Type typeArgument)
+	{
+		if (!openDefinition.IsGenericTypeDefinition || openDefinition.GetGenericArguments().Length != 1) return null;
+		var parameter = openDefinition.GetGenericArguments()[0];
+		var attributes = parameter.GenericParameterAttributes & System.Reflection.GenericParameterAttributes.SpecialConstraintMask;
+		if (attributes.HasFlag(System.Reflection.GenericParameterAttributes.NotNullableValueTypeConstraint) && !typeArgument.IsValueType) return null;
+		if (attributes.HasFlag(System.Reflection.GenericParameterAttributes.ReferenceTypeConstraint) && typeArgument.IsValueType) return null;
+		if (attributes.HasFlag(System.Reflection.GenericParameterAttributes.DefaultConstructorConstraint) && !typeArgument.IsValueType && typeArgument.GetConstructor(Type.EmptyTypes) == null) return null;
+		foreach (var constraint in parameter.GetGenericParameterConstraints())
+			if (!constraint.ContainsGenericParameters && !constraint.IsAssignableFrom(typeArgument)) return null;
+		try { return openDefinition.MakeGenericType(typeArgument); } catch { return null; }
+	}
+
+	/// <summary>Resolves an activity type name in any form the toolbox emits: a bare CoreWF
+	/// statement name, an assembly-qualified name, or a generic name - open (<c>ForEach`1</c>) or
+	/// closed (<c>ForEach`1[[System.String, ...]]</c>).</summary>
+	static Type? ResolveTypeName(string typeName)
+	{
+		if (typeName.Length == 0) return null;
+		if (typeName.Contains('.')) {
+			var qualified = Type.GetType(typeName, throwOnError: false);
+			if (qualified != null) return qualified;
+			var bare = typeName.Contains(", ", StringComparison.Ordinal) && !typeName.Contains("[[", StringComparison.Ordinal)
+				? typeName[..typeName.IndexOf(", ", StringComparison.Ordinal)]
+				: typeName;
+			return typeof(Sequence).Assembly.GetType(bare, throwOnError: false)
+				?? AppDomain.CurrentDomain.GetAssemblies().Select(assembly => assembly.GetType(bare, throwOnError: false)).FirstOrDefault(type => type != null);
+		}
+		return typeof(Sequence).Assembly.GetType("System.Activities.Statements." + typeName, throwOnError: false);
 	}
 
 	/// <summary>Reads/writes the "designable" properties of an activity for the Properties pad:
