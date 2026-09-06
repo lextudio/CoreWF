@@ -156,6 +156,25 @@ public sealed class WorkflowDocumentTests
 		Assert.Single(toolbox.Where(item => item.Name == "SwitchCase"));
 	}
 
+	[Fact]
+	public void An_unreadable_project_assembly_does_not_take_the_toolbox_down_with_it()
+	{
+		var service = new WorkflowDesignerHostService("aa");
+		service.Initialize("aa", DesignerProtocol.Version, "session");
+		var notAnAssembly = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".dll");
+		File.WriteAllText(notAnAssembly, "this is not an assembly");
+		try {
+			service.Open(new DesignerDocumentSnapshot {
+				SessionId = "session", DocumentId = "document", Version = 1, ProjectCodeMode = "Enabled",
+				ProjectAssemblyPath = notAnAssembly,
+				Files = { new DesignerSourceFileSnapshot { Kind = "Designer", FileName = "workflow.xaml", Text = Load(new Sequence()).ToXaml() } }
+			});
+			var toolbox = service.GetCapabilities("session", "document").Toolbox;
+			Assert.Single(toolbox.Where(item => item.Name == "Sequence"));
+			Assert.Empty(toolbox.Where(item => item.Category == "Project"));
+		} finally { File.Delete(notAnAssembly); }
+	}
+
 	static IEnumerable<DesignerElementNode> FlattenNodes(DesignerElementNode node) =>
 		new[] { node }.Concat(node.Children.SelectMany(FlattenNodes));
 

@@ -95,11 +95,61 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		var paths = new[] { snapshot.ProjectAssemblyPath }.Concat(snapshot.ReferencedAssemblyPaths)
 			.Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path) && path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase);
 		foreach (var path in paths) {
-			Assembly assembly;
-			try { assembly = Assembly.LoadFrom(path); } catch { continue; }
+			var assembly = LoadProjectAssembly(path);
+			if (assembly == null) continue;
 			var category = string.Equals(path, snapshot.ProjectAssemblyPath, StringComparison.OrdinalIgnoreCase) ? "Project" : "Referenced activity";
 			foreach (var type in ActivityTypes(assembly)) yield return ToolboxItem(type, category);
 		}
+	}
+
+	static readonly Dictionary<string, (DateTime Stamp, Assembly? Assembly)> projectAssemblies = new(StringComparer.OrdinalIgnoreCase);
+	static readonly HashSet<string> projectProbePaths = new(StringComparer.OrdinalIgnoreCase);
+	static bool projectResolverInstalled;
+
+	/// <summary>Loads a project or referenced assembly for the toolbox. The bytes are read rather
+	/// than <c>Assembly.LoadFrom</c>-ed for two reasons: LoadFrom keeps the build output locked,
+	/// and it returns the assembly already loaded from that path, so a rebuilt project kept
+	/// showing its previous activity list until the host restarted. Results are cached per
+	/// (path, write time) so a refresh that changed nothing does not reload anything.</summary>
+	static Assembly? LoadProjectAssembly(string path)
+	{
+		DateTime stamp;
+		try { stamp = File.GetLastWriteTimeUtc(path); } catch { return null; }
+		lock (projectAssemblies) {
+			if (projectAssemblies.TryGetValue(path, out var cached) && cached.Stamp == stamp) return cached.Assembly;
+			InstallProjectAssemblyResolver(Path.GetDirectoryName(path));
+			Assembly? assembly = null;
+			try { assembly = Assembly.Load(File.ReadAllBytes(path)); }
+			catch (Exception exception) {
+				// A referenced assembly the designer cannot read is not fatal - the rest of the
+				// toolbox still works - but silently dropping it made a missing custom activity
+				// impossible to explain.
+				Console.Error.WriteLine("WorkflowDesigner: could not load activities from " + path + ": " + exception.Message);
+			}
+			projectAssemblies[path] = (stamp, assembly);
+			return assembly;
+		}
+	}
+
+	/// <summary>Lets a byte-loaded project assembly find its own dependencies, which sit next to
+	/// the file it was read from rather than next to the designer host.</summary>
+	static void InstallProjectAssemblyResolver(string? probePath)
+	{
+		if (!string.IsNullOrEmpty(probePath)) projectProbePaths.Add(probePath!);
+		if (projectResolverInstalled) return;
+		projectResolverInstalled = true;
+		AppDomain.CurrentDomain.AssemblyResolve += (_, args) => {
+			var simpleName = new AssemblyName(args.Name).Name;
+			if (string.IsNullOrEmpty(simpleName)) return null;
+			string[] directories;
+			lock (projectAssemblies) directories = projectProbePaths.ToArray();
+			foreach (var directory in directories) {
+				var candidate = Path.Combine(directory, simpleName + ".dll");
+				if (!File.Exists(candidate)) continue;
+				try { return Assembly.Load(File.ReadAllBytes(candidate)); } catch { }
+			}
+			return null;
+		};
 	}
 
 	static IEnumerable<Type> ActivityTypes(Assembly assembly)
