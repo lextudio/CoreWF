@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="LibreWPF.Sdk">
   <PropertyGroup>
     <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../UnoDevelop/externals/OpenDevelop/'))</OpenDevelopRoot>
     <!-- An external WorkflowDesigner is debugged in an installed OpenDevelop through the Addin

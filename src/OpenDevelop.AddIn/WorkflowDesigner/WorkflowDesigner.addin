@@ -1,8 +1,13 @@
-<AddIn name="Workflow Designer" author="LeXtudio" description="Visual designer for Windows Workflow Foundation (CoreWF) activity files." addInManagerHidden="preinstalled">
+﻿<AddIn name="Workflow Designer" author="LeXtudio" description="Visual designer for Windows Workflow Foundation (CoreWF) activity files." addInManagerHidden="preinstalled">
   <Manifest><Identity name="ICSharpCode.WorkflowDesigner" /></Manifest>
   <Runtime><Import assembly="ICSharpCode.WorkflowDesigner.dll" /></Runtime>
-  <Path name="/SharpDevelop/Autostart">
+  <!-- The path is /SharpDevelop/Workbench/AutostartAfterWorkbenchInitialized (CallHelper.cs); a
+       mistyped path is never built and fails silently. /SharpDevelop/Autostart is too early for
+       RegisterWorkflowDialect: it touches ICSharpCode.SharpDevelop before that resolves. -->
+  <Path name="/SharpDevelop/Workbench/AutostartAfterWorkbenchInitialized">
     <Class id="ICSharpCode.WorkflowDesigner.RegisterDevFlowActionsCommand" class="ICSharpCode.WorkflowDesigner.RegisterDevFlowActionsCommand" />
+    <!-- Registers the "Workflow" dialect and its child host before any document is opened. -->
+    <Class id="ICSharpCode.WorkflowDesigner.RegisterWorkflowDialect" class="ICSharpCode.WorkflowDesigner.RegisterWorkflowDialect" />
   </Path>
   <Path name="/SharpDevelop/Workbench/DisplayBindings">
     <DisplayBinding id="WorkflowDesigner" type="Secondary" class="ICSharpCode.WorkflowDesigner.WorkflowDesignerDisplayBinding" fileNamePattern="\.xaml$" />

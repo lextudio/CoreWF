@@ -1,10 +1,12 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Collections.Generic;
 using System.Xml;
 
 using ICSharpCode.SharpDevelop;
 using ICSharpCode.SharpDevelop.Workbench;
+using ICSharpCode.SharpDevelop.LanguageServices.Xaml;
 
 namespace ICSharpCode.WorkflowDesigner;
 
@@ -13,9 +15,13 @@ namespace ICSharpCode.WorkflowDesigner;
 /// (doc/technotes/workflow-designer.md), and the exact root name/namespace
 /// <c>WpfDisplayBinding.CanAttachTo</c> already excludes itself on, so this and the WPF
 /// designer never fight over the same .xaml file.</summary>
-public sealed class WorkflowDesignerDisplayBinding : ISecondaryDisplayBinding
+public sealed class WorkflowDesignerDisplayBinding : IXamlDialectDisplayBinding
 {
 	const string ActivitiesNamespace = "http://schemas.microsoft.com/netfx/2009/xaml/activities";
+
+	/// <summary>Declares which dialect this binding owns so the workbench routes activity XAML
+	/// here, instead of this addin having to hope every other designer declines it.</summary>
+	public IEnumerable<string> Dialects { get { return new[] { WorkflowDesignerDialect.Dialect }; } }
 
 	public bool ReattachWhenParserServiceIsReady => false;
 
