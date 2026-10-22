@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == '' And '$(OPENDEVELOP_ROOT)' != ''">$([MSBuild]::EnsureTrailingSlash('$(OPENDEVELOP_ROOT)'))</OpenDevelopRoot>
     <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../UnoDevelop/externals/OpenDevelop/'))</OpenDevelopRoot>
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Exe</OutputType>

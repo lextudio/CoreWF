@@ -23,17 +23,17 @@ sealed class WorkflowDesignerHostClient : DesignerDocumentHostClient, IDesignHos
 		return connection;
 	}
 
-	public Task<DesignerSessionState> OpenAsync(DesignerDocumentSnapshot snapshot, CancellationToken token = default) => Document.OpenAsync(snapshot, token);
+	public Task<DesignerSessionState> OpenAsync(DesignerDocumentSnapshot snapshot, CancellationToken token = default, DesignerViewport? viewport = null) => Document.OpenAsync(snapshot, viewport, token);
 	public Task<DesignerCapabilities> GetCapabilitiesAsync(CancellationToken token = default) => connection.InvokeAsync<DesignerCapabilities>("design/capabilities", new { sessionId = SessionId, documentId = DocumentId }, token);
 	public Task<DesignerCapabilities> RefreshCapabilitiesAsync(DesignerDocumentSnapshot snapshot, CancellationToken token = default) => connection.InvokeAsync<DesignerCapabilities>("workflow/refresh-capabilities", new { sessionId = SessionId, documentId = DocumentId, snapshot }, token);
-	public Task<DesignerSessionState> UpdateAsync(DesignerDocumentSnapshot snapshot, CancellationToken token = default) => Document.UpdateAsync(snapshot, token);
+	public Task<DesignerSessionState> UpdateAsync(DesignerDocumentSnapshot snapshot, CancellationToken token = default, DesignerViewport? viewport = null) => Document.UpdateAsync(snapshot, viewport, token);
 	public Task<DesignerEditSet> FlushAsync(long baseVersion, CancellationToken token = default) => Document.FlushAsync(baseVersion, token);
 	public Task<DesignerSessionState> SetPropertyAsync(long baseVersion, string elementId, string propertyName, string value, CancellationToken token = default)
 		=> Document.SetPropertyAsync(baseVersion, elementId, propertyName, value, token);
 	public Task<DesignerSessionState> RenameAsync(long baseVersion, string elementId, string newName, CancellationToken token = default)
 		=> Document.RenameAsync(baseVersion, elementId, newName, token);
-	public Task<DesignerSessionState> AddElementAsync(long baseVersion, string parentId, DesignerToolboxItemInfo item, string proposedName, double x, double y, CancellationToken token = default)
-		=> Document.AddElementAsync(baseVersion, parentId, item, proposedName, x, y, token);
+	public Task<DesignerSessionState> AddElementAsync(long baseVersion, string parentId, DesignerToolboxItemInfo item, string proposedName, double x, double y, DesignerDropTarget dropTarget = null, CancellationToken token = default)
+		=> Document.AddElementAsync(baseVersion, parentId, item, proposedName, x, y, dropTarget, token);
 	public Task<DesignerSessionState> DeleteElementsAsync(long baseVersion, string[] elementIds, CancellationToken token = default)
 		=> Document.DeleteElementsAsync(baseVersion, elementIds, token);
 	public Task<bool> CopyElementsAsync(string[] elementIds, CancellationToken token = default)

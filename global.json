@@ -10,6 +10,6 @@
   // Deliberately no "sdk" section: pinning the .NET SDK version here would constrain every other
   // project in this repository, which this entry has no business doing.
   "msbuild-sdks": {
-    "LibreWPF.Sdk": "0.1.0-preview.57"
+    "LibreWPF.Sdk": "0.1.0-preview.65"
   }
 }

@@ -37,8 +37,11 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 		return new HostHandshake { ProtocolVersion = DesignerProtocol.Version, Runtime = "CoreWF ActivityBuilder", ProcessId = Environment.ProcessId, SessionId = sessionId };
 	}
 
-	[JsonRpcMethod("session/open")] public DesignerSessionState Open(DesignerDocumentSnapshot snapshot) => Load(snapshot);
-	[JsonRpcMethod("session/update")] public DesignerSessionState Update(DesignerDocumentSnapshot snapshot) => Load(snapshot);
+	// Since DesignerProtocol v3 (OpenDevelop d25ca8ee7c) the common client sends the document and
+	// an optional presenter viewport together as session/open|update's single "request" argument.
+	// Workflow activities are laid out by the addin's own canvas, so the viewport is not consumed.
+	[JsonRpcMethod("session/open")] public DesignerSessionState Open(DesignerDocumentRequest request) => Load(request.Snapshot);
+	[JsonRpcMethod("session/update")] public DesignerSessionState Update(DesignerDocumentRequest request) => Load(request.Snapshot);
 
 	[JsonRpcMethod("design/capabilities")]
 	public DesignerCapabilities GetCapabilities(string sessionId, string documentId)
@@ -222,8 +225,11 @@ sealed class WorkflowDesignerHostService : IDesignerChildService
 	public DesignerSessionState Rename(string sessionId, string documentId, long baseVersion, string elementId, string newName)
 		=> SetProperty(sessionId, documentId, baseVersion, elementId, "$displayName", newName);
 
+	// dropTarget is the shared-protocol hint a layout-structured container uses to choose an index
+	// or cell. A workflow tree is a fixed structural model, so the parent plus the drop point already
+	// determine the only valid position; the hint is accepted (the client always sends it) and ignored.
 	[JsonRpcMethod("design/add-element")]
-	public DesignerSessionState AddElement(string sessionId, string documentId, long baseVersion, string parentId, DesignerToolboxItemInfo item, string proposedName, double x, double y)
+	public DesignerSessionState AddElement(string sessionId, string documentId, long baseVersion, string parentId, DesignerToolboxItemInfo item, string proposedName, double x, double y, DesignerDropTarget dropTarget = null)
 	{
 		documents.ValidateSession(sessionId);
 		var session = Get(sessionId, documentId);

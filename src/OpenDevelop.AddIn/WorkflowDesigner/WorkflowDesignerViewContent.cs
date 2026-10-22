@@ -473,12 +473,29 @@ public sealed partial class WorkflowDesignerViewContent : AbstractViewContentHan
 	/// <summary>Moves an activity subtree into another container. This goes through the host's
 	/// cut/paste, which round-trips the subtree as XAML, so the moved activity keeps its
 	/// properties, variables and children instead of being rebuilt from its type name.</summary>
+	/// <summary>Element ids are index paths ("9.0", "9.$foreach-body.0"), so removing an earlier
+	/// sibling renumbers the ones after it. A move cuts first, which invalidates a target id taken
+	/// before the cut; shift the first segment where the two paths diverge numerically, the same way
+	/// the tree itself renumbers.</summary>
+	static string ShiftIdForRemovedSibling(string id, string removedId)
+	{
+		var target = id.Split('.');
+		var removed = removedId.Split('.');
+		for (var index = 0; index < target.Length && index < removed.Length; index++) {
+			if (string.Equals(target[index], removed[index], StringComparison.Ordinal)) continue;
+			if (int.TryParse(target[index], out var targetIndex) && int.TryParse(removed[index], out var removedIndex) && removedIndex < targetIndex)
+				target[index] = (targetIndex - 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+			break;
+		}
+		return string.Join(".", target);
+	}
+
 	bool MoveInto(string sourceId, string targetId)
 	{
 		if (host == null || !CanMoveInto(sourceId, targetId)) return false;
 		try {
 			Mutate(() => host.CutElementsAsync(state.Version, new[] { sourceId }).GetAwaiter().GetResult());
-			Mutate(() => host.PasteElementsAsync(state.Version, targetId).GetAwaiter().GetResult());
+			Mutate(() => host.PasteElementsAsync(state.Version, ShiftIdForRemovedSibling(targetId, sourceId)).GetAwaiter().GetResult());
 			if (state.CreatedElementId is { } id && selection.Find(id) is { } moved) selection.Select(moved);
 			return true;
 		} catch (Exception exception) {

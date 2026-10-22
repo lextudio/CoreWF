@@ -1,5 +1,9 @@
 <Project Sdk="LibreWPF.Sdk">
   <PropertyGroup>
+    <!-- The OPENDEVELOP_ROOT environment variable reaches evaluations this project cannot pass a
+         -p: to, such as the hosting OpenDevelop reading StartArguments (the integration suite's
+         parent host). Same fallback as the Stride and MAUI add-ins. -->
+    <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == '' And '$(OPENDEVELOP_ROOT)' != ''">$([MSBuild]::EnsureTrailingSlash('$(OPENDEVELOP_ROOT)'))</OpenDevelopRoot>
     <OpenDevelopRoot Condition="'$(OpenDevelopRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../UnoDevelop/externals/OpenDevelop/'))</OpenDevelopRoot>
     <!-- An external WorkflowDesigner is debugged in an installed OpenDevelop through the Addin
          SDK's -addindir: launch, never by copying its output into the application bundle. -->
