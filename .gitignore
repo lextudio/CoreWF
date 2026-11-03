@@ -260,3 +260,6 @@ paket-files/
 # Agents
 .claude/settings.local.json
 CLAUDE.local.md
+# Project-local OpenDevelop caches (Roslyn reference/solution snapshots) written next to a
+# project when the IDE opens it during development or an integration run.
+.od/
