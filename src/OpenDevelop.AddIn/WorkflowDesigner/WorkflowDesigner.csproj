@@ -31,8 +31,20 @@
     <ProjectReference Include="$(OpenDevelopRoot)src/Main/Designer/Designer.Shell/Designer.Shell.csproj" Private="false" />
     <ProjectReference Include="..\WorkflowDesigner.Host\WorkflowDesigner.Host.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" SkipGetTargetFrameworkProperties="true" />
     <!-- DevFlow attributes are development/test instrumentation, matching the other designer
-         addins; the runtime agent is already supplied by the OpenDevelop Debug host. -->
-    <PackageReference Include="LeXtudio.DevFlow.Agent.Core" Version="0.2.3" />
+         addins; the runtime agent is already supplied by the OpenDevelop Debug host.
+         Keep this at the host's own pin (OpenDevelop's Directory.Packages.props): the attributes
+         are discovered by the host's agent, so a lower compile-time version loads a second copy
+         into the same process. -->
+    <PackageReference Include="LeXtudio.DevFlow.Agent.Core" Version="0.3.1" />
+    <!-- The referenced OpenDevelop projects require these BCL extension packages at the versions
+         below; without an explicit floor the transitive graph below this project still resolves
+         the older patch releases and restore fails with NU1605 (warnings are errors here). They
+         are compile-time floors only: the host process already provides every one of them. -->
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="10.0.13" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Formats.Nrbf" Version="10.0.13" ExcludeAssets="runtime" />
+    <PackageReference Include="System.IO.Packaging" Version="10.0.13" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Security.Permissions" Version="10.0.13" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Windows.Extensions" Version="10.0.13" ExcludeAssets="runtime" />
   </ItemGroup>
   <ItemGroup><None Include="WorkflowDesigner.addin" /></ItemGroup>
   <ItemGroup>
