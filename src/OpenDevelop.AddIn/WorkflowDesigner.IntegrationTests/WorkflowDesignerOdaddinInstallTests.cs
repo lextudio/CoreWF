@@ -39,51 +39,82 @@ public sealed class WorkflowDesignerOdaddinInstallTests
 				["OD_ADDIN_GITHUB_DOWNLOAD"] = github.Base.ToString(),
 			};
 
-			// First run: trust the repository and install the release from the AddIn Manager.
-			using (var first = await IsolatedIde.StartAsync(config, environment))
-			{
-				Assert.True((await first.InvokeAsync("od.addin-manager.show")).GetProperty("success").GetBoolean());
-				await first.InvokeAsync("od.test.queue-dialog-answer", "question", "[\"yes\"]");
-				Assert.True((await first.InvokeAsync("od.addin-manager.trust", Repository)).GetProperty("success").GetBoolean());
-				await first.InvokeAsync("od.addin-manager.refresh");
-				var state = await WaitAsync(first, s => Entries(s, "AvailableAddInsViewModel").Any(), "the Workflow Designer to be listed");
-				string name = Entries(state, "AvailableAddInsViewModel").Single().GetProperty("name").GetString()!;
-				Assert.True((await first.InvokeAsync("od.addin-manager.install", "Available", name)).GetProperty("success").GetBoolean());
-				await WaitAsync(first, s => Entries(s, "InstalledAddInsViewModel").Any(e => e.GetProperty("id").GetString() == Identity), "the add-in to be installed");
-			}
-
-			// Second run, same configuration: the add-in is part of the tree and works.
-			using (var second = await IsolatedIde.StartAsync(config, environment))
-			{
-				var addIns = await second.InvokeAsync("od.addins");
-				var loaded = addIns.GetProperty("addins").EnumerateArray()
-					.FirstOrDefault(a => a.GetProperty("fileName").GetString()?.Contains("WorkflowDesigner", StringComparison.OrdinalIgnoreCase) == true);
-				Assert.True(loaded.ValueKind == JsonValueKind.Object, "The installed add-in is not in the add-in tree: " + addIns);
-				Assert.True(loaded.GetProperty("enabled").GetBoolean(), loaded.ToString());
-
-				string workflow = Path.Combine(work, "flow.xaml");
-				await File.WriteAllTextAsync(workflow, """
-					<Activity xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
-					          xmlns:s="clr-namespace:System.Activities.Statements;assembly=System.Activities">
-					  <s:Sequence DisplayName="Installed sequence">
-					    <s:Delay Duration="00:00:00.2" />
-					    <s:WriteLine Text="installed from a .odaddin" />
-					  </s:Sequence>
-					</Activity>
-					""");
-				Assert.True((await second.InvokeAsync("od.open-file", workflow)).GetProperty("opened").GetBoolean());
-				var designer = await second.InvokeAsync("od.activate-secondary-view", workflow, "ICSharpCode.WorkflowDesigner.WorkflowDesignerViewContent");
-				Assert.True(designer.GetProperty("success").GetBoolean(), designer.ToString());
-				var status = await second.InvokeAsync("od.workflow-designer.status");
-				Assert.True(status.GetProperty("active").GetBoolean(), status.ToString());
-				Assert.True(status.GetProperty("elementCount").GetInt32() >= 2, status.ToString());
-			}
+			await RunJourneyAsync(config, work, environment);
 		}
 		finally
 		{
 			try { Directory.Delete(work, true); } catch (IOException) { }
 		}
 	}
+
+	/// <summary>Trust the repository, install the add-in from the AddIn Manager, restart on the same configuration, then use it.</summary>
+	static async Task RunJourneyAsync(string config, string work, IReadOnlyDictionary<string, string?> environment)
+	{
+		// First run: trust the repository and install the release from the AddIn Manager.
+		using (var first = await IsolatedIde.StartAsync(config, environment))
+		{
+			Assert.True((await first.InvokeAsync("od.addin-manager.show")).GetProperty("success").GetBoolean());
+			await first.InvokeAsync("od.test.queue-dialog-answer", "question", "[\"yes\"]");
+			Assert.True((await first.InvokeAsync("od.addin-manager.trust", Repository)).GetProperty("success").GetBoolean());
+			await first.InvokeAsync("od.addin-manager.refresh");
+			var state = await WaitAsync(first, s => Entries(s, "AvailableAddInsViewModel").Any(), "the Workflow Designer to be listed");
+			string name = Entries(state, "AvailableAddInsViewModel").Single().GetProperty("name").GetString()!;
+			Assert.True((await first.InvokeAsync("od.addin-manager.install", "Available", name)).GetProperty("success").GetBoolean());
+			await WaitAsync(first, s => Entries(s, "InstalledAddInsViewModel").Any(e => e.GetProperty("id").GetString() == Identity), "the add-in to be installed");
+		}
+
+		// Second run, same configuration: the add-in is part of the tree and works.
+		using (var second = await IsolatedIde.StartAsync(config, environment))
+		{
+			var addIns = await second.InvokeAsync("od.addins");
+			var loaded = addIns.GetProperty("addins").EnumerateArray()
+				.FirstOrDefault(a => a.GetProperty("fileName").GetString()?.Contains("WorkflowDesigner", StringComparison.OrdinalIgnoreCase) == true);
+			Assert.True(loaded.ValueKind == JsonValueKind.Object, "The installed add-in is not in the add-in tree: " + addIns);
+			Assert.True(loaded.GetProperty("enabled").GetBoolean(), loaded.ToString());
+
+			string workflow = Path.Combine(work, "flow.xaml");
+			await File.WriteAllTextAsync(workflow, """
+				<Activity xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+				          xmlns:s="clr-namespace:System.Activities.Statements;assembly=System.Activities">
+				  <s:Sequence DisplayName="Installed sequence">
+				    <s:Delay Duration="00:00:00.2" />
+				    <s:WriteLine Text="installed from a .odaddin" />
+				  </s:Sequence>
+				</Activity>
+				""");
+			Assert.True((await second.InvokeAsync("od.open-file", workflow)).GetProperty("opened").GetBoolean());
+			var designer = await second.InvokeAsync("od.activate-secondary-view", workflow, "ICSharpCode.WorkflowDesigner.WorkflowDesignerViewContent");
+			Assert.True(designer.GetProperty("success").GetBoolean(), designer.ToString());
+			var status = await second.InvokeAsync("od.workflow-designer.status");
+			Assert.True(status.GetProperty("active").GetBoolean(), status.ToString());
+			Assert.True(status.GetProperty("elementCount").GetInt32() >= 2, status.ToString());
+		}
+	}
+
+	/// <summary>
+	/// The same journey against the real api.github.com and the release that is actually published: nothing is faked
+	/// and nothing is served locally. Opt in with COREWF_REAL_GITHUB=1 (it uses the unauthenticated API: 60 requests
+	/// an hour per address); needs OD_IT_IDE_DLL, the host OpenDevelop.dll under test.
+	/// </summary>
+	[Fact]
+	public async Task PublishedRelease_InstallsFromRealGitHub_RestartsLoadsAndOpensAWorkflow()
+	{
+		Assert.SkipUnless(Environment.GetEnvironmentVariable("COREWF_REAL_GITHUB") == "1" && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OD_IT_IDE_DLL")),
+			"Set COREWF_REAL_GITHUB=1 and OD_IT_IDE_DLL (host OpenDevelop.dll) to install the published release from github.com.");
+
+		string work = Path.Combine(Path.GetTempPath(), "od-it-corewf-real-" + Guid.NewGuid().ToString("N"));
+		string config = Directory.CreateDirectory(Path.Combine(work, "config")).FullName;
+		try
+		{
+			// No OD_ADDIN_GITHUB_* overrides: the IDE talks to github.com.
+			await RunJourneyAsync(config, work, new Dictionary<string, string?> { ["OD_TEST_USER_ADDINS"] = "1" });
+		}
+		finally
+		{
+			try { Directory.Delete(work, true); } catch (IOException) { }
+		}
+	}
+
 
 	static IEnumerable<JsonElement> Entries(JsonElement state, string listType) =>
 		state.GetProperty("lists").EnumerateArray()
