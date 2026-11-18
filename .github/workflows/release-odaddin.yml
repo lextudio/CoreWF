@@ -1,0 +1,105 @@
+name: Release the OpenDevelop add-in
+
+# Pushing a tag vMAJOR.MINOR.PATCH[-suffix] builds the Workflow Designer add-in as WorkflowDesigner.odaddin against an
+# OpenDevelop release and publishes it as the one asset of a GitHub release of this repository. OpenDevelop users who
+# trust this repository (Tools > Options > AddIns > Trusted repositories) then see it in the AddIn Manager.
+# See OpenDevelop's doc/technotes/addin-github-releases.md for the format and the rules this follows.
+#
+# The add-in is built against an unpacked OpenDevelop release (no OpenDevelop source, no GitHub Packages token): its
+# assemblies are referenced from there and the Addin SDK is the one that release ships.
+#
+# Run by hand (workflow_dispatch) it is a rehearsal: it builds and checks the package and uploads it as a run
+# artifact, but releases nothing.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without the leading v (it must equal the Identity version in WorkflowDesigner.addin)'
+        required: true
+      opendevelop_tag:
+        description: 'OpenDevelop release to build against'
+        default: 'v5.9.1'
+
+permissions:
+  contents: write
+
+env:
+  OPENDEVELOP_REPOSITORY: lextudio/OpenDevelop
+  # The release the add-in is built against, whose version the SharpDevelop dependency range in WorkflowDesigner.addin (5.9) must cover.
+  OPENDEVELOP_TAG: ${{ inputs.opendevelop_tag || vars.OPENDEVELOP_TAG || 'v5.9.1' }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.x
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then version="${GITHUB_REF_NAME#v}"; else version="${{ inputs.version }}"; fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::'$version' is not MAJOR.MINOR.PATCH[-suffix]"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $version against OpenDevelop $OPENDEVELOP_TAG"
+
+      - name: Download the OpenDevelop release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/opendevelop"
+          gh release download "$OPENDEVELOP_TAG" --repo "$OPENDEVELOP_REPOSITORY" --pattern 'OpenDevelop-linux-x64.tar.xz' --dir "$RUNNER_TEMP/opendevelop"
+          tar -xJf "$RUNNER_TEMP/opendevelop/OpenDevelop-linux-x64.tar.xz" -C "$RUNNER_TEMP/opendevelop"
+          host="$RUNNER_TEMP/opendevelop/OpenDevelop-linux-x64"
+          for required in ICSharpCode.SharpDevelop.dll Sdks/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets SdkResolvers/OpenDevelop.Addin.SdkResolver/OpenDevelop.Addin.SdkResolver.dll AddIns/DisplayBindings/WpfDesign/Host/ICSharpCode.Designer.Server.dll; do
+            [[ -f "$host/$required" ]] || { echo "::error::$OPENDEVELOP_TAG does not contain $required"; exit 1; }
+          done
+          echo "OPENDEVELOP_HOST=$host/" >> "$GITHUB_ENV"
+          echo "MSBUILDADDITIONALSDKRESOLVERSFOLDER=$host/SdkResolvers" >> "$GITHUB_ENV"
+
+      - name: Build and pack WorkflowDesigner.odaddin
+        run: >
+          dotnet build src/OpenDevelop.AddIn/WorkflowDesigner.Release/WorkflowDesigner.Release.csproj
+          -c Release -t:PackOdAddin --disable-build-servers
+          -p:OpenDevelopHostBin="$OPENDEVELOP_HOST"
+          -p:OpenDevelopAddinReleaseVersion="${{ steps.version.outputs.version }}"
+          -p:RestoreConfigFile="$GITHUB_WORKSPACE/src/OpenDevelop.AddIn/NuGet.Release.Config"
+
+      - name: Check the package
+        run: |
+          package=src/OpenDevelop.AddIn/WorkflowDesigner.Release/bin/odaddin/WorkflowDesigner.odaddin
+          ls -l "$package"
+          unzip -l "$package" | head -20
+          [[ "$(unzip -Z1 "$package" | grep -c '^[^/]*\.addin$')" == "1" ]] || { echo "::error::the package must have exactly one .addin at its root"; exit 1; }
+          unzip -p "$package" WorkflowDesigner.addin | grep -q 'version="${{ steps.version.outputs.version }}"' \
+            || { echo "::error::the manifest's version is not ${{ steps.version.outputs.version }}"; exit 1; }
+          size=$(stat -c %s "$package"); (( size < 200*1024*1024 )) || { echo "::error::package is $size bytes; the host payload is probably not trimmed"; exit 1; }
+          cp "$package" WorkflowDesigner.odaddin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WorkflowDesigner.odaddin
+          path: WorkflowDesigner.odaddin
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # A release was drafted by hand: its one asset is this package.
+            gh release upload "$GITHUB_REF_NAME" WorkflowDesigner.odaddin --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" WorkflowDesigner.odaddin --title "$GITHUB_REF_NAME" \
+              --notes "Workflow Designer for OpenDevelop ${OPENDEVELOP_TAG#v} (add-in version ${GITHUB_REF_NAME#v}). Trust this repository in Tools > Options > AddIns > Trusted repositories, then install it from the AddIn Manager." "${flags[@]}"
+          fi

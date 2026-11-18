@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk;OpenDevelop.Addin.Sdk">
+  <!-- The Workflow Designer add-in built against an INSTALLED OpenDevelop instead of its source tree: the host's
+       assemblies are referenced from OpenDevelopHostBin (an unpacked release or an installed app, with a trailing
+       slash), the OpenDevelop.Addin.Sdk comes from that same installation (MSBUILDADDITIONALSDKRESOLVERSFOLDER pointing
+       at its SdkResolvers folder), and nothing from GitHub Packages is needed. This is what the release workflow builds.
+       It compiles the very same sources as ../WorkflowDesigner/WorkflowDesigner.csproj, which stays the project for
+       working inside the OpenDevelop checkout. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- The WPF the add-in compiles against is the host's own (LibreWPF), not the Windows Desktop targeting pack. -->
+    <UseWPF>false</UseWPF>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <AssemblyName>ICSharpCode.WorkflowDesigner</AssemblyName>
+    <RootNamespace>ICSharpCode.WorkflowDesigner</RootNamespace>
+    <OpenDevelopAddinKind>InProcess</OpenDevelopAddinKind>
+    <OpenDevelopDistributionBuild>true</OpenDevelopDistributionBuild>
+    <!-- The release asset is WorkflowDesigner.odaddin, whatever this project is called. -->
+    <OpenDevelopAddinPackageName>WorkflowDesigner</OpenDevelopAddinPackageName>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <Import Project="..\AddInDeploy.props" />
+  <PropertyGroup>
+    <OutputPath>$(WorkflowDesignerDeployDir)</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\WorkflowDesigner\*.cs" />
+    <OpenDevelopAddinManifest Include="..\WorkflowDesigner\WorkflowDesigner.addin" />
+    <EmbeddedResource Include="..\WorkflowDesigner\Icons\*.xaml" LogicalName="Icons.%(Filename)%(Extension)" />
+    <!-- The child host is a separate, self-contained project (net10, its own closure); the add-in only needs it built and deployed. -->
+    <ProjectReference Include="..\WorkflowDesigner.Host.Release\WorkflowDesigner.Host.Release.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Every managed assembly the host ships at its root, except what the .NET reference pack already provides. -->
+    <HostAssembly Include="$(OpenDevelopHostBin)*.dll"
+                  Exclude="$(OpenDevelopHostBin)System.*.dll;$(OpenDevelopHostBin)Microsoft.*.dll;$(OpenDevelopHostBin)mscorlib.dll;$(OpenDevelopHostBin)netstandard.dll;$(OpenDevelopHostBin)kernel32.dll;$(OpenDevelopHostBin)user32.dll;$(OpenDevelopHostBin)gdi32.dll;$(OpenDevelopHostBin)dwmapi.dll;$(OpenDevelopHostBin)uxtheme.dll;$(OpenDevelopHostBin)shell32.dll;$(OpenDevelopHostBin)gdiplus.dll;$(OpenDevelopHostBin)comdlg32.dll;$(OpenDevelopHostBin)PresentationNative_cor3.dll" />
+    <HostAssembly Include="$(OpenDevelopHostBin)System.Xaml.dll;$(OpenDevelopHostBin)System.Windows.*.dll;$(OpenDevelopHostBin)System.IO.Packaging.dll;$(OpenDevelopHostBin)System.Windows.Forms.dll;$(OpenDevelopHostBin)System.Drawing.dll" />
+    <Reference Include="@(HostAssembly)" Private="false" />
+  </ItemGroup>
+  <Target Name="WorkflowDesignerRequireHost" BeforeTargets="BeforeBuild;ResolveAssemblyReferences">
+    <Error Condition="'$(OpenDevelopHostBin)' == '' Or !Exists('$(OpenDevelopHostBin)ICSharpCode.SharpDevelop.dll')"
+           Text="Set OpenDevelopHostBin (with a trailing slash) to an OpenDevelop release or installation: ICSharpCode.SharpDevelop.dll was not found in '$(OpenDevelopHostBin)'." />
+  </Target>
+  <!-- Same pruning as ../WorkflowDesigner/WorkflowDesigner.csproj: a distribution build drops host payload that is not a
+       managed add-in assembly before PackOdAddin zips the folder. The child host under Host/ is left alone. -->
+  <Target Name="WorkflowDesignerPruneHostPayload" AfterTargets="Build" BeforeTargets="PackOdAddin">
+    <ItemGroup>
+      <_WfHostPayloadFile Include="$(OutputPath)*.pdb;$(OutputPath)Cliclick*" />
+      <_WfHostPayloadFile Include="$(OutputPath)*/*.resources.dll" />
+    </ItemGroup>
+    <Delete Files="@(_WfHostPayloadFile)" />
+    <RemoveDir Directories="$(OutputPath)runtimes" />
+  </Target>
+</Project>
