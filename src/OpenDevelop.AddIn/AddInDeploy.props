@@ -9,4 +9,11 @@
     <WorkflowDesignerDeployDir Condition="'$(WorkflowDesignerDeployDir)' == '' And '$(OpenDevelopDistributionBuild)' == 'true'">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)bin/odaddin-output/'))</WorkflowDesignerDeployDir>
     <WorkflowDesignerDeployDir Condition="'$(WorkflowDesignerDeployDir)' == ''">$(OpenDevelopRoot)AddIns/DisplayBindings/WorkflowDesigner/</WorkflowDesignerDeployDir>
   </PropertyGroup>
+  <!-- The Addin SDK trims an add-in's output by OpenDevelop.host-assemblies.txt, the names of the host's own assemblies.
+       OpenDevelop releases up to v5.9.1 do not ship it (later ones write it at the application root). When the host
+       directory (OpenDevelopHostBin, with a trailing slash) has none, use the copy in this repository, taken from v5.9.1;
+       a host that ships its own list is always preferred. Refresh the copy when a newer host adds assemblies. -->
+  <PropertyGroup>
+    <OpenDevelopHostManifest Condition="'$(OpenDevelopHostManifest)' == '' And '$(OpenDevelopHostBin)' != '' And !Exists('$(OpenDevelopHostBin)OpenDevelop.host-assemblies.txt')">$(MSBuildThisFileDirectory)OpenDevelop.host-assemblies.txt</OpenDevelopHostManifest>
+  </PropertyGroup>
 </Project>
