@@ -1,0 +1,12 @@
+<Project>
+  <!-- Where the Workflow Designer add-in and its child host are deployed.
+       A normal build deploys into the OpenDevelop checkout's AddIns folder (what the IDE and the
+       integration suites load). A distribution build (-p:OpenDevelopDistributionBuild=true, used to
+       produce the .odaddin release package) deploys into this repository's own bin/odaddin-output
+       instead, so the package is made from its own output and never from, or into, the host tree.
+       The add-in and WorkflowDesigner.Host both import this file so they agree on the folder. -->
+  <PropertyGroup>
+    <WorkflowDesignerDeployDir Condition="'$(WorkflowDesignerDeployDir)' == '' And '$(OpenDevelopDistributionBuild)' == 'true'">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)bin/odaddin-output/'))</WorkflowDesignerDeployDir>
+    <WorkflowDesignerDeployDir Condition="'$(WorkflowDesignerDeployDir)' == ''">$(OpenDevelopRoot)AddIns/DisplayBindings/WorkflowDesigner/</WorkflowDesignerDeployDir>
+  </PropertyGroup>
+</Project>

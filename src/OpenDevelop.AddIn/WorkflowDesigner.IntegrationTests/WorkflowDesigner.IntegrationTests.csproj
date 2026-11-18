@@ -14,5 +14,7 @@
     <!-- The fixture's public members are typed by RuntimeCell; the OpenDevelop test project gets it
          from a sibling file, so an external project that links only the fixture must link this too. -->
     <Compile Include="$(OpenDevelopRoot)tests/OpenDevelop.IntegrationTests/RuntimeCell.cs" Link="RuntimeCell.cs" />
+    <!-- One IDE process of its own (own config directory, own DevFlow port): the install journey restarts it. -->
+    <Compile Include="$(OpenDevelopRoot)tests/OpenDevelop.IntegrationTests/IsolatedIde.cs" Link="IsolatedIde.cs" />
   </ItemGroup>
 </Project>

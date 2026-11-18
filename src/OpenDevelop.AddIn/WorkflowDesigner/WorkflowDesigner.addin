@@ -1,5 +1,10 @@
-﻿<AddIn name="Workflow Designer" author="LeXtudio" description="Visual designer for Windows Workflow Foundation (CoreWF) activity files." addInManagerHidden="preinstalled">
-  <Manifest><Identity name="ICSharpCode.WorkflowDesigner" /></Manifest>
+﻿<AddIn name="Workflow Designer" author="LeXtudio" description="Visual designer for Windows Workflow Foundation (CoreWF) activity files.">
+  <Manifest>
+    <!-- The version is the release tag without its "v" (PackOdAddin refuses a package whose manifest and tag disagree);
+         the SharpDevelop dependency states which OpenDevelop versions this build was made for. -->
+    <Identity name="ICSharpCode.WorkflowDesigner" version="23.10.5" />
+    <Dependency addin="SharpDevelop" version="5.9" />
+  </Manifest>
   <Runtime><Import assembly="ICSharpCode.WorkflowDesigner.dll" /></Runtime>
   <!-- The path is /SharpDevelop/Workbench/AutostartAfterWorkbenchInitialized (CallHelper.cs); a
        mistyped path is never built and fails silently. /SharpDevelop/Autostart is too early for

@@ -13,13 +13,20 @@
     <OpenDevelopDebugDevFlowPort Condition="'$(OpenDevelopDebugDevFlowPort)' == '' And '$(OD_TEST_MODE)' == '1'">9301</OpenDevelopDebugDevFlowPort>
     <OpenDevelopAddin>true</OpenDevelopAddin>
     <OpenDevelopAddinKind>InProcess</OpenDevelopAddinKind>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <!-- The published LibreWPF closure ships lib/net10.0 only; LibreWPF.Sdk derives these folders from the TargetFramework, so pin them back (same block as OpenDevelop's Directory.Build.props). -->
+    <_ProGpuWpfManagedTransportRuntimeTfm>net10.0</_ProGpuWpfManagedTransportRuntimeTfm>
+    <_ProGpuWpfCanonicalWinFormsRuntimeTfm>net10.0</_ProGpuWpfCanonicalWinFormsRuntimeTfm>
+    <_ProGpuWpfPortableWinFormsCompatRuntimeTfm>net10.0</_ProGpuWpfPortableWinFormsCompatRuntimeTfm>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWPF>true</UseWPF>
     <AssemblyName>ICSharpCode.WorkflowDesigner</AssemblyName>
     <RootNamespace>ICSharpCode.WorkflowDesigner</RootNamespace>
-    <OutputPath>$(OpenDevelopRoot)AddIns\DisplayBindings\WorkflowDesigner\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <Import Project="..\AddInDeploy.props" />
+  <PropertyGroup>
+    <OutputPath>$(WorkflowDesignerDeployDir)</OutputPath>
   </PropertyGroup>
   <Import Project="$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.props" Condition="Exists('$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.props')" />
   <ItemGroup>
@@ -40,11 +47,11 @@
          below; without an explicit floor the transitive graph below this project still resolves
          the older patch releases and restore fails with NU1605 (warnings are errors here). They
          are compile-time floors only: the host process already provides every one of them. -->
-    <PackageReference Include="System.Configuration.ConfigurationManager" Version="10.0.13" ExcludeAssets="runtime" />
-    <PackageReference Include="System.Formats.Nrbf" Version="10.0.13" ExcludeAssets="runtime" />
-    <PackageReference Include="System.IO.Packaging" Version="10.0.13" ExcludeAssets="runtime" />
-    <PackageReference Include="System.Security.Permissions" Version="10.0.13" ExcludeAssets="runtime" />
-    <PackageReference Include="System.Windows.Extensions" Version="10.0.13" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="11.0.0-rc.2.26504.105" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Formats.Nrbf" Version="11.0.0-rc.2.26504.105" ExcludeAssets="runtime" />
+    <PackageReference Include="System.IO.Packaging" Version="11.0.0-rc.2.26504.105" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Security.Permissions" Version="11.0.0-rc.2.26504.105" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Windows.Extensions" Version="11.0.0-rc.2.26504.105" ExcludeAssets="runtime" />
   </ItemGroup>
   <ItemGroup><None Include="WorkflowDesigner.addin" /></ItemGroup>
   <ItemGroup>
@@ -56,4 +63,20 @@
     <EmbeddedResource Include="Icons\*.xaml" LogicalName="Icons.%(Filename)%(Extension)" />
   </ItemGroup>
   <Import Project="$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets" Condition="Exists('$(OpenDevelopRoot)src/SDK/OpenDevelop.Addin.Sdk/Sdk/Sdk.targets')" />
+  <!-- The referenced OpenDevelop projects drag the host's own payload into this output: native
+       runtimes, satellite resources, symbols and tools. The host process already provides all of it
+       and a .odaddin is managed AnyCPU code only, so a distribution build drops it before PackOdAddin
+       zips the folder. The child host under Host/ is self-contained and is left alone. -->
+  <Target Name="WorkflowDesignerPruneHostPayload" AfterTargets="Build" BeforeTargets="PackOdAddin" Condition="'$(OpenDevelopDistributionBuild)' == 'true'">
+    <ItemGroup>
+      <_WfHostPayloadFile Include="$(OutputPath)*.pdb;$(OutputPath)Cliclick*" />
+      <_WfHostPayloadFile Include="$(OutputPath)*/*.resources.dll" />
+    </ItemGroup>
+    <ItemGroup>
+      <_WfHostPayloadDirectory Include="$(OutputPath)runtimes" />
+      <_WfHostPayloadDirectory Include="@(_WfHostPayloadFile->'%(RootDir)%(Directory)')" Condition="'%(Filename)' != ''" />
+    </ItemGroup>
+    <Delete Files="@(_WfHostPayloadFile)" />
+    <RemoveDir Directories="$(OutputPath)runtimes" />
+  </Target>
 </Project>

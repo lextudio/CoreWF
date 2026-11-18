@@ -4,9 +4,9 @@
 		<RoslynPackageVersion>5.6.0</RoslynPackageVersion>
 		<WarningsAsErrors>true</WarningsAsErrors>
 		<EnableWindowsTargeting>true</EnableWindowsTargeting>
-		<UseWPF Condition="$(TargetFramework) == 'net10.0-windows'">true</UseWPF>
+		<UseWPF Condition="$(TargetFramework) == 'net10.0-windows' OR $(TargetFramework) == 'net11.0-windows'">true</UseWPF>
 	</PropertyGroup>
-	<ItemGroup Condition="$(AssemblyName) != 'System.Xaml' AND $(TargetFramework) != 'net10.0-windows'">
+	<ItemGroup Condition="$(AssemblyName) != 'System.Xaml' AND $(TargetFramework) != 'net10.0-windows' AND $(TargetFramework) != 'net11.0-windows'">
 		<ProjectReference Include="$(MSBuildThisFileDirectory)System.Xaml/System.Xaml.csproj" PrivateAssets="All" />
 	</ItemGroup>
 </Project>
