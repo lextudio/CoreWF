@@ -21,7 +21,7 @@ on:
         required: true
       opendevelop_tag:
         description: 'OpenDevelop release to build against'
-        default: 'v5.9.1'
+        default: 'v5.9.3'
 
 permissions:
   contents: write
@@ -29,7 +29,7 @@ permissions:
 env:
   OPENDEVELOP_REPOSITORY: lextudio/OpenDevelop
   # The release the add-in is built against, whose version the SharpDevelop dependency range in WorkflowDesigner.addin (5.9) must cover.
-  OPENDEVELOP_TAG: ${{ inputs.opendevelop_tag || vars.OPENDEVELOP_TAG || 'v5.9.1' }}
+  OPENDEVELOP_TAG: ${{ inputs.opendevelop_tag || vars.OPENDEVELOP_TAG || 'v5.9.3' }}
 
 jobs:
   package:
